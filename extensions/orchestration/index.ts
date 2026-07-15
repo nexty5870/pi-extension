@@ -4,7 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { classifyApprovalIntent, isCompletionDirective, type ApprovalIntent } from "./approval.ts";
+import { classifyApprovalIntent, isCompletionDirective, isLinearIssueCreateDirective, type ApprovalIntent } from "./approval.ts";
 import {
   contractFromInput,
   contractHash,
@@ -27,7 +27,7 @@ import {
   restoreInitiative,
 } from "./session-state.ts";
 import { OrchestrationStore } from "./store.ts";
-import { approveContractLocally, normalizeApprovedIssueCreateArguments, planLinearPersistence } from "./persistence.ts";
+import { approveContractLocally, isApprovedContractCreatePending, normalizeApprovedIssueCreateArguments, normalizeDirectIssueCreateArguments, planLinearPersistence } from "./persistence.ts";
 import { ArgvCommandRunner } from "./delivery/command.ts";
 import { GitAdapter } from "./delivery/git.ts";
 import { GitHubAdapter } from "./delivery/github.ts";
@@ -122,7 +122,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   let manager: McpManager | undefined;
   let approvalArmed = false;
   let approvalIntent: ApprovalIntent = "none";
-  let linearCreateArmed = false;
+  let operatorIssueCreateArmed = false;
+  let linearCreateInFlight = false;
   let operatorWorkflowUpdateArmed = false;
   let completedWorkflowStatusIds = new Set<string>();
   let linearResourceAliases = new Map<string, string>();
@@ -186,7 +187,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     initiative = restoreInitiative(ctx);
     approvalArmed = false;
     approvalIntent = "none";
-    linearCreateArmed = false;
+    operatorIssueCreateArmed = false;
+    linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
     if (initiative) {
       delivery = await new DeliveryStore(store.initiativeDir(initiative)).latest();
@@ -222,14 +224,16 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     requestFooterRender?.();
     approvalArmed = false;
     approvalIntent = "none";
-    linearCreateArmed = false;
+    operatorIssueCreateArmed = false;
+    linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
   });
 
   pi.on("session_shutdown", async () => {
     approvalArmed = false;
     approvalIntent = "none";
-    linearCreateArmed = false;
+    operatorIssueCreateArmed = false;
+    linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
     activeDeliveryAbort?.abort();
     activeDeliveryAbort = undefined;
@@ -240,6 +244,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   pi.on("input", (event) => {
     approvalIntent = classifyApprovalIntent(event.text);
     approvalArmed = approvalIntent === "explicit" && initiative?.status === "review";
+    operatorIssueCreateArmed = isLinearIssueCreateDirective(event.text);
     operatorWorkflowUpdateArmed = isCompletionDirective(event.text);
     completedWorkflowStatusIds = new Set<string>();
     return { action: "continue" };
@@ -248,20 +253,29 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   pi.on("tool_call", (event) => {
     if (event.toolName.startsWith("linear_")) {
       const input = event.input as Record<string, unknown>;
-      if (event.toolName === "linear_create_issue" && linearCreateArmed && initiative?.contract && initiative.approved) {
-        const normalized = normalizeApprovedIssueCreateArguments(initiative.contract, initiative.approved.approvedAt, input);
-        for (const key of Object.keys(input)) delete input[key];
-        Object.assign(input, normalized);
+      const contractCreatePending = isApprovedContractCreatePending(initiative);
+      if (event.toolName === "linear_create_issue") {
+        if (linearCreateInFlight) return { block: true, reason: "A Linear issue creation call is already in flight" };
+        const normalized = contractCreatePending && initiative?.contract && initiative.approved
+          ? normalizeApprovedIssueCreateArguments(initiative.contract, initiative.approved.approvedAt, input)
+          : operatorIssueCreateArmed
+            ? normalizeDirectIssueCreateArguments(input)
+            : input;
+        if (normalized !== input) {
+          for (const key of Object.keys(input)) delete input[key];
+          Object.assign(input, normalized);
+        }
       }
       const authorization = authorizeLinearTool(event.toolName, input, {
         initiative,
-        allowCreateIssue: linearCreateArmed,
+        allowCreateIssue: contractCreatePending,
+        allowDirectIssueCreate: operatorIssueCreateArmed && !contractCreatePending,
         allowWorkflowUpdate: operatorWorkflowUpdateArmed,
         completedStatusIds: completedWorkflowStatusIds,
         resourceAliases: linearResourceAliases,
       });
       if (!authorization.allowed) return { block: true, reason: authorization.reason };
-      if (event.toolName === "linear_create_issue") linearCreateArmed = false;
+      if (event.toolName === "linear_create_issue") linearCreateInFlight = true;
     }
     if (!initiative || initiative.status === "closed") return;
     if (["edit", "write", "bash"].includes(event.toolName)) {
@@ -273,6 +287,13 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event) => {
+    if (event.toolName === "linear_create_issue") {
+      linearCreateInFlight = false;
+      if (!event.isError) {
+        const created = findLinearIssue(event.details) ?? findLinearIssue(event.content);
+        if (created?.id || created?.identifier) operatorIssueCreateArmed = false;
+      }
+    }
     if (!event.isError && /^(?:linear_(?:list|get)_(?:teams|projects))$/.test(event.toolName)) {
       collectLinearResourceAliases(event.details, linearResourceAliases);
       collectLinearResourceAliases(event.content, linearResourceAliases);
@@ -336,6 +357,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   pi.on("agent_settled", () => {
     approvalArmed = false;
     approvalIntent = "none";
+    operatorIssueCreateArmed = false;
+    linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
     completedWorkflowStatusIds = new Set<string>();
   });
@@ -351,9 +374,11 @@ For a new feature or bug, work conversationally and ask one decision question at
 When the contract is complete, call team_contract_draft with the full standard contract. Its complete Markdown must be shown to the operator.
 Call team_contract_approve after any clear acceptance or action directive, including “approve, get it done”, “do it”, “ship it”, or “mark it done”. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
 When invoking pi-linear tools, treat human names and canonical IDs as different representations of the same approved destination, not as scope changes. Before a write that needs teamId, teamKey, projectId, stateId, or another canonical reference, call the relevant linear_list_* or linear_get_* tool and use the exact schema field and canonical value returned. Never place a project name in projectId. A read-proven name-to-ID substitution does not change contract scope, must not increment the contract version, and must not trigger reapproval. For approved issue creation, provide only the canonical destination identifiers; orchestration injects the exact approved title and managed description, so never reconstruct hidden markers or ask for reapproval because of formatting. After every Linear write, read the issue back and report success only after verifying the requested result.
-${operatorWorkflowUpdateArmed
-      ? "The operator directly instructed you to complete the active Linear issue. This is an administrative workflow update, not implementation work: do not create a retrospective contract or request another approval. Resolve the team's completed status with read tools, call linear_update_issue for the exact active issue with stateId, then call linear_get_issue and report success only if the returned status is completed. Do not make any other mutation."
-      : "During design, use only linear_list_*, linear_get_*, and linear_search_* tools. Do not implement, modify project files, create branches, or mutate Linear during design."}`;
+${operatorIssueCreateArmed
+      ? "The operator directly asked to open a Linear tracking issue. This is not implementation approval: do not draft a retrospective contract, call team_contract_approve, mention an implementation phrase, or ask for another approval. Resolve canonical team/project identifiers with read tools, then call linear_create_issue with a concise title and description. If an approved pending contract already exists, orchestration injects its approved title/body automatically. A failed API/schema call does not consume authorization: correct the arguments and retry. Read the created issue back before reporting success."
+      : operatorWorkflowUpdateArmed
+        ? "The operator directly instructed you to complete the active Linear issue. This is an administrative workflow update, not implementation work: do not create a retrospective contract or request another approval. Resolve the team's completed status with read tools, call linear_update_issue for the exact active issue with stateId, then call linear_get_issue and report success only if the returned status is completed. Do not make any other mutation."
+        : "During design, use only linear_list_*, linear_get_*, and linear_search_* tools. Do not implement, modify project files, create branches, or mutate Linear during design."}`;
     return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
   });
 
@@ -429,7 +454,6 @@ ${operatorWorkflowUpdateArmed
       const persistence = planLinearPersistence(initiative.contract, approvedAt);
       initiative.approved = approved;
       initiative.status = "approved";
-      linearCreateArmed = persistence?.toolName === "linear_create_issue";
       const markdown = `${renderContract(initiative.contract)}\n---\n\n**Approved at:** ${approvedAt}\n\n**Content hash:** \`${approved.contentHash}\`\n`;
       initiative.contractPath = await store.writeContract(initiative, markdown);
       await saveInitiative(initiative);

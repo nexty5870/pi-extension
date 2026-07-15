@@ -94,6 +94,14 @@ test("prevents generic MCP and third-party Linear write bypass", () => {
   assert.equal(authorizeLinearTool("linear_save_project", {}, { initiative: initiative({ issueId: "issue-1" }) }).allowed, false);
 });
 
+test("allows a direct tracking issue without an implementation contract", () => {
+  const aliases = collectLinearResourceAliases({ teams: [{ id: "team-uuid", key: "DEMO" }], projects: [{ id: "project-uuid", name: "Public Launch" }] });
+  const args = { teamId: "team-uuid", projectId: "project-uuid", title: "Track scheduler defect", description: "The scheduler retries too quickly." };
+  assert.equal(authorizeLinearTool("linear_create_issue", args, { allowDirectIssueCreate: true, resourceAliases: aliases }).allowed, true);
+  assert.equal(authorizeLinearTool("linear_create_issue", args, { allowDirectIssueCreate: true }).allowed, false);
+  assert.equal(authorizeLinearTool("linear_create_issue", { ...args, labelIds: ["extra"] }, { allowDirectIssueCreate: true, resourceAliases: aliases }).allowed, false);
+});
+
 test("allows read-proven canonical team/project IDs without contract reapproval", () => {
   const active = initiative({ team: "Demo Team" });
   active.contract!.linear.project = "Public Launch";

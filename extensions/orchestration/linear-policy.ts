@@ -93,6 +93,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 export interface LinearPolicyContext {
   initiative?: InitiativeState;
   allowCreateIssue?: boolean;
+  /** One-turn capability created by a direct operator request to open a tracking issue. */
+  allowDirectIssueCreate?: boolean;
   /** One-turn capability created by a direct operator request such as “mark it done”. */
   allowWorkflowUpdate?: boolean;
   completedStatusIds?: ReadonlySet<string>;
@@ -115,6 +117,26 @@ export function authorizeLinearTool(
   }
   if (classification === "unknown") {
     return { allowed: false, reason: `Unknown Linear tool ${toolName} is blocked by default` };
+  }
+
+  if (toolName.toLowerCase() === "linear_create_issue" && context.allowDirectIssueCreate) {
+    const teamId = stringAt(args, ["teamId"]);
+    const teamKey = stringAt(args, ["teamKey"]);
+    const actualTeam = teamId ?? teamKey;
+    if (!actualTeam || !resolvedLinearId(actualTeam, context.resourceAliases)) {
+      return { allowed: false, reason: "Direct issue creation requires a teamId/teamKey proven by a pi-linear read in this turn" };
+    }
+    const projectId = stringAt(args, ["projectId"]);
+    if (projectId && !resolvedLinearId(projectId, context.resourceAliases)) {
+      return { allowed: false, reason: "Direct issue creation projectId must be proven by a pi-linear read in this turn" };
+    }
+    if (typeof args.title !== "string" || !args.title.trim()) {
+      return { allowed: false, reason: "Direct issue creation requires a title" };
+    }
+    if (!hasOnlyKeys(args, ["teamId", "teamKey", "projectId", "title", "description"])) {
+      return { allowed: false, reason: "Direct issue creation contains unsupported fields" };
+    }
+    return { allowed: true };
   }
 
   const initiative = context.initiative;

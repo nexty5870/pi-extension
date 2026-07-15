@@ -50,6 +50,12 @@ With neither a team nor issue, validation succeeds and rendering says:
 
 A team means approval may create an issue. An issue ID or identifier means approval may update that issue. Drafting and reloading Markdown never contact Linear.
 
+## Direct Linear tracking
+
+Tracking administration is intentionally separate from implementation contracts. A direct operator request to open, create, file, log, add, or record a Linear bug/issue/ticket grants a one-turn issue-creation capability without drafting or approving a contract. The agent gathers only missing tracking details, resolves canonical destination IDs with read tools, creates the issue with restricted fields, and reads it back.
+
+Creation authorization is consumed only after a successful result containing an issue ID/identifier. Schema/API failures remain retryable during the turn. Approved contract persistence uses durable `approved.linearPersistence === "pending"` state rather than an in-memory bit, so failed calls and `/reload` do not require reapproval. A single in-flight guard prevents parallel duplicate creation.
+
 ## Review and approval
 
 `team_contract_draft` validates a complete draft, renders all Markdown in Pi, writes a private snapshot, and enters `review`. Zed opens only after explicit `/team-contract open`; `/team-contract reload` reparses and validates operator edits.
@@ -162,7 +168,8 @@ The CTO design session itself still blocks project mutation. Read-only scouts re
 - Local-only approval stores state and performs no network/integration call.
 - Clear acceptance/action intent works without prescribed wording; bare acknowledgements, deliberative questions, and negation do not approve.
 - Direct completion instructions can update only workflow fields on the exact active issue without retrospective contract ceremony.
-- Configured Linear destinations produce create/update plans and persist result metadata.
+- Direct tracking requests create restricted Linear issues without implementation contracts or approval ceremony.
+- Configured Linear destinations produce create/update plans, retain pending authorization across failure/reload, and persist result metadata.
 - pi-linear reads, writes, destructive tools, workspace switching, and unknown tools classify correctly.
 - Third-party `linear_*` tools pass through the same interception boundary.
 - Generic MCP static headers still reach its HTTP transport while Linear MCP routes are rejected.

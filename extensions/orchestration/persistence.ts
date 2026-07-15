@@ -1,6 +1,16 @@
 import { contractHash, renderLinearContract } from "./contracts.ts";
 import { hasLinearDestination } from "./linear-policy.ts";
-import type { ApprovedContractRecord, FeatureOrBugContract } from "./types.ts";
+import type { ApprovedContractRecord, FeatureOrBugContract, InitiativeState } from "./types.ts";
+
+export function isApprovedContractCreatePending(initiative: InitiativeState | undefined): boolean {
+  return Boolean(
+    initiative?.status === "approved" &&
+    initiative.approved?.linearPersistence === "pending" &&
+    initiative.contract?.linear.team &&
+    !initiative.contract.linear.issueId &&
+    !initiative.contract.linear.issueIdentifier,
+  );
+}
 
 export function approveContractLocally(
   contract: FeatureOrBugContract,
@@ -34,6 +44,20 @@ function proposedString(proposed: Record<string, unknown>, key: string): string 
  * The extension, not the model, owns approved persistence formatting. Only canonical
  * destination identifiers survive from proposed pi-linear arguments.
  */
+export function normalizeDirectIssueCreateArguments(proposed: Record<string, unknown>): Record<string, unknown> {
+  const teamId = proposedString(proposed, "teamId");
+  const teamKey = proposedString(proposed, "teamKey");
+  const projectId = proposedString(proposed, "projectId");
+  const title = proposedString(proposed, "title");
+  const description = proposedString(proposed, "description");
+  return {
+    ...(teamId ? { teamId } : teamKey ? { teamKey } : {}),
+    ...(projectId ? { projectId } : {}),
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+  };
+}
+
 export function normalizeApprovedIssueCreateArguments(
   contract: FeatureOrBugContract,
   approvedAt: string,

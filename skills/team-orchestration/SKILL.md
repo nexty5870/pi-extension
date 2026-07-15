@@ -15,6 +15,10 @@ Treat the current Git repository and caller cmux workspace as the project. Keep 
 4. Keep drafts local. Do not mutate Linear, project code, branches, commits, PRs, merges, or deployments.
 5. A Linear team or issue is optional; do not invent one for GitHub/docs-only work.
 
+## Direct Linear tracking
+
+When the operator asks to open, file, log, add, or record a Linear bug, issue, or ticket, treat that as an administrative tracking request—not implementation design. Do not create a retrospective contract, call `team_contract_approve`, mention an implementation approval phrase, or ask for approval again. Gather only missing issue content or destination details, resolve canonical IDs with read tools, call `linear_create_issue`, and read the issue back. If the API/schema call fails, correct and retry; authorization is consumed only after successful creation. If an approved pending contract already exists, its creation authorization remains valid across failed calls and `/reload`.
+
 ## Review and approval
 
 Call `team_contract_draft` only with a complete Feature or Bug contract. Show its full Markdown. `/team-contract open` is an optional explicit Zed review action; never open or focus Zed automatically.
@@ -39,7 +43,8 @@ Approval is stored locally first. If no Linear destination is configured, report
 - A read-proven name/key-to-ID substitution preserves the approved destination scope. Do not revise the contract, increment its version, or ask for reapproval solely to normalize identifiers.
 - For approved issue creation, supply canonical destination identifiers and let orchestration inject the exact approved title and managed description. Never reconstruct hidden markers or request reapproval for persistence formatting.
 - After every write, call `linear_get_issue` and report success only when the requested destination/content/status is confirmed.
-- After approval, only `linear_create_issue` for the planned destination and update/comment operations scoped to the active issue are permitted.
+- A direct operator tracking request may call `linear_create_issue` without an implementation contract; fields are restricted and destination IDs must be read-proven.
+- Approved planned issue creation remains authorized durably until successful persistence, including across failed calls and `/reload`; update/comment operations remain scoped to the active issue.
 - Never delete, archive, mutate unrelated projects/documents, switch workspaces, or use unknown `linear_*` tools.
 - Never expose credentials or route Linear through generic MCP.
 
