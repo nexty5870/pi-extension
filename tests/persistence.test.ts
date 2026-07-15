@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { contractFromInput } from "../extensions/orchestration/contracts.ts";
-import { approveContractLocally, normalizeApprovedIssueCreateArguments, planLinearPersistence } from "../extensions/orchestration/persistence.ts";
+import { approveContractLocally, isApprovedContractCreatePending, normalizeApprovedIssueCreateArguments, normalizeDirectIssueCreateArguments, planLinearPersistence } from "../extensions/orchestration/persistence.ts";
 
 function contract(linear?: { team?: string; issueId?: string }) {
   return contractFromInput({
@@ -18,12 +18,32 @@ function contract(linear?: { team?: string; issueId?: string }) {
 
 const approvedAt = "2026-01-01T00:00:00.000Z";
 
+test("approved pending issue creation survives serialization and reload", () => {
+  const value = contract({ team: "DEMO" });
+  const initiative = {
+    schemaVersion: 1 as const, initiativeId: "i", projectId: "p", projectRoot: "/tmp/example", status: "approved" as const,
+    contract: value, approved: approveContractLocally(value, approvedAt), createdAt: approvedAt, updatedAt: approvedAt,
+  };
+  const restored = JSON.parse(JSON.stringify(initiative));
+  assert.equal(isApprovedContractCreatePending(restored), true);
+  restored.approved.linearPersistence = "persisted";
+  assert.equal(isApprovedContractCreatePending(restored), false);
+});
+
 test("approves local-only contracts without planning a Linear contact", () => {
   const local = contract();
   const approved = approveContractLocally(local, approvedAt);
   assert.equal(approved.source, "local");
   assert.equal(approved.linearPersistence, "not-configured");
   assert.equal(planLinearPersistence(local, approvedAt), undefined);
+});
+
+test("normalizes direct tracking creation without hidden contract formatting", () => {
+  assert.deepEqual(normalizeDirectIssueCreateArguments({ input: {
+    teamId: "team-uuid", projectId: "project-uuid", title: "Track defect", description: "Observed behavior", priority: 1,
+  }, labelIds: ["ignored"] }), {
+    teamId: "team-uuid", projectId: "project-uuid", title: "Track defect", description: "Observed behavior",
+  });
 });
 
 test("normalizes proposed pi-linear creation to the exact approved managed payload", () => {

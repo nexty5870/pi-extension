@@ -40,6 +40,15 @@ export function isCompletionDirective(text: string): boolean {
   return !negated && !deliberative && (direct || workflow);
 }
 
+export function isLinearIssueCreateDirective(text: string): boolean {
+  const normalized = normalizeApprovalText(text);
+  const negated = /\b(?:do not|don t|never|not)\b.*\b(?:open|create|file|log|add|record)\b/.test(normalized);
+  const deliberative = /^(?:should|shall) (?:we|i)\b/.test(normalized);
+  const actionFirst = /\b(?:open|create|file|log|add|record)\b.{0,100}\b(?:bug|issue|ticket)\b/.test(normalized);
+  const resourceFirst = /\b(?:bug|issue|ticket)\b.{0,60}\b(?:in|on) linear\b/.test(normalized);
+  return !negated && !deliberative && (actionFirst || resourceFirst);
+}
+
 export function classifyApprovalIntent(text: string): ApprovalIntent {
   const normalized = normalizeApprovalText(text);
   if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|implement|proceed|continue|ship|mark|complete|close|set|move|update|change)\b/.test(normalized)) return "none";
