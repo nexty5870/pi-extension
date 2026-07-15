@@ -25,8 +25,13 @@ test("normalizes case, surrounding whitespace, and punctuation", () => {
 test("accepts completion directives without magic wording", () => {
   assert.equal(isCompletionDirective("mark it done"), true);
   assert.equal(isCompletionDirective("can you mark it done?"), true);
+  assert.equal(isCompletionDirective("ok lets update DEMO-38 on linear since it's already done then"), true);
+  assert.equal(isCompletionDirective("set the issue to completed"), true);
+  assert.equal(isCompletionDirective("move DEMO-38 to Done"), true);
+  assert.equal(isCompletionDirective("change it to closed"), true);
   assert.equal(isCompletionDirective("should we mark it done?"), false);
   assert.equal(isCompletionDirective("do not mark it done"), false);
+  assert.equal(isCompletionDirective("do not update it to done"), false);
 });
 
 test("does not promote vague acknowledgements or negation to approval", () => {
