@@ -73,7 +73,9 @@ For a configured destination, the approval result provides a tool name, approved
 - `linear_create_issue` with the approved title, managed contract body, and configured team; or
 - `linear_update_issue` with the active issue and managed contract body.
 
-Human destination names are not copied blindly into ID fields. Immediately before writing, the agent uses pi-linear list/get tools to resolve canonical `teamId`, `teamKey`, `projectId`, `stateId`, or other schema-specific references. The policy records name/key/ID aliases from those read results and accepts a canonical substitution only when both representations resolve to the same resource. This operational normalization does not alter approved scope, contract hash, or version and therefore does not require reapproval. Every write is followed by an issue readback.
+Human destination names are not copied blindly into ID fields. Immediately before writing, the agent uses pi-linear list/get tools to resolve canonical `teamId`, `teamKey`, `projectId`, `stateId`, or other schema-specific references. The policy records name/key/ID aliases from those read results and accepts a canonical substitution only when both representations resolve to the same resource. This operational normalization does not alter approved scope, contract hash, or version and therefore does not require reapproval.
+
+For issue creation, the model proposes only canonical destination identifiers. The `tool_call` hook removes unapproved fields and injects the exact approved title plus the machine-managed description generated from the approved contract. Hidden marker formatting is therefore an orchestration responsibility rather than a model retry/reapproval requirement. Every write is followed by an issue readback.
 
 Successful persistence tool results update local approval state to `persisted`; the agent still performs readback before reporting success to the operator. The managed body is delimited by `<!-- pi-contract:start -->` and `<!-- pi-contract:end -->`. Operators can inspect the target issue before update when preservation of unrelated description text is needed.
 

@@ -37,6 +37,7 @@ Approval is stored locally first. If no Linear destination is configured, report
 - `/linear-auth`, `/linear-settings`, and workspace selection are operator-controlled.
 - Before every write, inspect the pi-linear tool schema and resolve human team/project/status names with the relevant `linear_list_*` or `linear_get_*` tool. Use canonical values in `teamId`, `teamKey`, `projectId`, `stateId`, and similar ID fields; never put a display name into an ID field.
 - A read-proven name/key-to-ID substitution preserves the approved destination scope. Do not revise the contract, increment its version, or ask for reapproval solely to normalize identifiers.
+- For approved issue creation, supply canonical destination identifiers and let orchestration inject the exact approved title and managed description. Never reconstruct hidden markers or request reapproval for persistence formatting.
 - After every write, call `linear_get_issue` and report success only when the requested destination/content/status is confirmed.
 - After approval, only `linear_create_issue` for the planned destination and update/comment operations scoped to the active issue are permitted.
 - Never delete, archive, mutate unrelated projects/documents, switch workspaces, or use unknown `linear_*` tools.
