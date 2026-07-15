@@ -4,7 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { classifyApprovalIntent, type ApprovalIntent } from "./approval.ts";
+import { classifyApprovalIntent, isCompletionDirective, type ApprovalIntent } from "./approval.ts";
 import {
   contractFromInput,
   contractHash,
@@ -16,7 +16,7 @@ import {
 } from "./contracts.ts";
 import { loadMcpConfig } from "./mcp/config.ts";
 import { McpManager } from "./mcp/client.ts";
-import { authorizeLinearTool, isLinearMcpRoute } from "./linear-policy.ts";
+import { authorizeLinearTool, collectCompletedStatusIds, isLinearMcpRoute } from "./linear-policy.ts";
 import { notifyActionRequired } from "./notifications.ts";
 import { TeamOverviewComponent } from "./overview/component.ts";
 import { resolveProjectContext } from "./project-context.ts";
@@ -39,7 +39,6 @@ import { renderTeamFooter, type TeamUiSnapshot } from "./delivery/ui.ts";
 import type { DeliveryState } from "./delivery/types.ts";
 import type { InitiativeState, ProjectContext } from "./types.ts";
 
-const APPROVAL_EXAMPLE = "Approve contract and start implementation";
 const MAX_TOOL_TEXT = 50 * 1024;
 
 const optionalString = () => Type.Optional(Type.String());
@@ -124,6 +123,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   let approvalArmed = false;
   let approvalIntent: ApprovalIntent = "none";
   let linearCreateArmed = false;
+  let operatorWorkflowUpdateArmed = false;
+  let completedWorkflowStatusIds = new Set<string>();
   let delivery: DeliveryState | undefined;
   let activeDeliveryAbort: AbortController | undefined;
   const uiSnapshot: TeamUiSnapshot = {};
@@ -185,6 +186,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     approvalArmed = false;
     approvalIntent = "none";
     linearCreateArmed = false;
+    operatorWorkflowUpdateArmed = false;
     if (initiative) {
       delivery = await new DeliveryStore(store.initiativeDir(initiative)).latest();
       uiSnapshot.delivery = delivery;
@@ -220,12 +222,14 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     approvalArmed = false;
     approvalIntent = "none";
     linearCreateArmed = false;
+    operatorWorkflowUpdateArmed = false;
   });
 
   pi.on("session_shutdown", async () => {
     approvalArmed = false;
     approvalIntent = "none";
     linearCreateArmed = false;
+    operatorWorkflowUpdateArmed = false;
     activeDeliveryAbort?.abort();
     activeDeliveryAbort = undefined;
     await manager?.close();
@@ -235,6 +239,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   pi.on("input", (event) => {
     approvalIntent = classifyApprovalIntent(event.text);
     approvalArmed = approvalIntent === "explicit" && initiative?.status === "review";
+    operatorWorkflowUpdateArmed = isCompletionDirective(event.text);
+    completedWorkflowStatusIds = new Set<string>();
     return { action: "continue" };
   });
 
@@ -243,6 +249,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
       const authorization = authorizeLinearTool(event.toolName, event.input as Record<string, unknown>, {
         initiative,
         allowCreateIssue: linearCreateArmed,
+        allowWorkflowUpdate: operatorWorkflowUpdateArmed,
+        completedStatusIds: completedWorkflowStatusIds,
       });
       if (!authorization.allowed) return { block: true, reason: authorization.reason };
       if (event.toolName === "linear_create_issue") linearCreateArmed = false;
@@ -257,6 +265,10 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event) => {
+    if (!event.isError && event.toolName === "linear_list_issue_statuses" && operatorWorkflowUpdateArmed) {
+      completedWorkflowStatusIds = collectCompletedStatusIds(event.details);
+      if (completedWorkflowStatusIds.size === 0) completedWorkflowStatusIds = collectCompletedStatusIds(event.content);
+    }
     if (event.isError || !initiative?.contract || !initiative.approved) return;
     if (event.toolName !== "linear_create_issue" && event.toolName !== "linear_update_issue") return;
     const issue = findLinearIssue(event.details) ?? findLinearIssue(event.content);
@@ -312,6 +324,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   pi.on("agent_settled", () => {
     approvalArmed = false;
     approvalIntent = "none";
+    operatorWorkflowUpdateArmed = false;
+    completedWorkflowStatusIds = new Set<string>();
   });
 
   pi.on("before_agent_start", (event, ctx) => {
@@ -323,8 +337,10 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     const guidance = `Pi team orchestration is available in this repository.
 For a new feature or bug, work conversationally and ask one decision question at a time. Keep drafts local.
 When the contract is complete, call team_contract_draft with the full standard contract. Its complete Markdown must be shown to the operator.
-Call team_contract_approve only after unambiguous implementation approval such as “${APPROVAL_EXAMPLE}”. Case and punctuation do not matter. If the latest acknowledgement is ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}, ask the operator to confirm implementation approval.
-During design, use only linear_list_*, linear_get_*, and linear_search_* tools. Do not implement, modify project files, create branches, or mutate Linear during design.`;
+Call team_contract_approve after any clear acceptance or action directive, including “approve, get it done”, “do it”, “ship it”, or “mark it done”. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
+${operatorWorkflowUpdateArmed
+      ? "The operator directly instructed you to complete the active Linear issue. This is an administrative workflow update, not implementation work: do not create a retrospective contract or request another approval. Resolve the team's completed status with read tools, call linear_update_issue for the exact active issue with stateId, then call linear_get_issue and report success only if the returned status is completed. Do not make any other mutation."
+      : "During design, use only linear_list_*, linear_get_*, and linear_search_* tools. Do not implement, modify project files, create branches, or mutate Linear during design."}`;
     return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
   });
 
@@ -389,7 +405,7 @@ During design, use only linear_list_*, linear_get_*, and linear_search_* tools. 
     description: "Approve the review-ready contract locally and prepare optional pi-linear persistence after unambiguous operator approval",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, ctx) {
-      if (!approvalArmed) throw new Error(`Approval is not confirmed. Ask the operator to clearly approve implementation (for example: ${APPROVAL_EXAMPLE}).`);
+      if (!approvalArmed) throw new Error("Approval is not confirmed. Accept any clear operator directive; ask only when intent is genuinely ambiguous.");
       approvalArmed = false;
       if (!initiative?.contract) throw new Error("No review-ready contract is active");
       await reloadContract();

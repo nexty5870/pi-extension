@@ -29,7 +29,7 @@ Authenticate only through the operator-controlled `/linear-auth` command and con
 
 Design can use only `linear_list_*`, `linear_get_*`, and `linear_search_*`. After explicit approval, issue creation or update/comment operations are restricted to the configured active issue. Delete/archive operations, project or document mutations, workspace switching by the agent, and unknown `linear_*` tools are blocked.
 
-Approval does not require a magic phrase. Unambiguous variants include “Approve contract and start implementation”, “approved, implement”, and “go ahead and implement”. Vague replies such as “ok” and “looks good” trigger a confirmation request.
+Approval follows clear operator intent rather than a magic phrase. “Approve, get it done”, “do it”, “ship it”, “go ahead”, and “mark it done” are accepted without asking the operator to repeat themselves. Only genuinely non-actionable acknowledgements such as a bare “ok” or “looks good” require clarification. A direct “mark it done” resolves the team's completed status, updates only the active issue's workflow state, and reads the issue back before reporting success—without manufacturing an implementation contract. It still cannot target unrelated issues or authorize destructive operations.
 
 Useful optional commands:
 

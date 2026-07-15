@@ -54,13 +54,9 @@ A team means approval may create an issue. An issue ID or identifier means appro
 
 `team_contract_draft` validates a complete draft, renders all Markdown in Pi, writes a private snapshot, and enters `review`. Zed opens only after explicit `/team-contract open`; `/team-contract reload` reparses and validates operator edits.
 
-The input hook normalizes Unicode, case, surrounding whitespace, and punctuation. These are explicit approvals after a review-ready contract:
+The input hook normalizes Unicode, case, surrounding whitespace, and punctuation, then recognizes clear acceptance or action intent. `Approve, get it done`, `approved`, `do it`, `ship it`, `go ahead`, `proceed`, and `mark it done` cross the approval gate after a review-ready contract. The operator does not need to separately mention implementation or repeat prescribed wording.
 
-- `Approve contract and start implementation`
-- `approved, implement`
-- `go ahead and implement`
-
-Vague acknowledgements such as `ok`, `looks good`, or `go ahead` are not approval. The model is instructed to ask for confirmation rather than block on a magic phrase.
+Only genuinely non-actionable acknowledgements such as a bare `ok` or `looks good` remain ambiguous. Negated instructions and deliberative questions such as `should we?` do not approve; direct requests such as `can you mark it done?` do. A direct completion instruction creates a one-turn capability for workflow fields on the exact active Linear issue. The requested `stateId` must come from a completed team status discovered in that turn, and the issue is read back before success is reported. Unrelated fields, issues, creation, destructive tools, and workspace changes remain blocked.
 
 `team_contract_approve` consumes a single-use in-memory capability. It reloads the local Markdown, validates it again, and stores a local approval record before any optional integration call. Local-only approval does not initialize MCP or call Linear.
 
@@ -160,7 +156,8 @@ The CTO design session itself still blocks project mutation. Read-only scouts re
 
 - Local-only Feature and Bug contracts validate.
 - Local-only approval stores state and performs no network/integration call.
-- Explicit approval tolerates case and punctuation; vague acknowledgements require confirmation.
+- Clear acceptance/action intent works without prescribed wording; bare acknowledgements, deliberative questions, and negation do not approve.
+- Direct completion instructions can update only workflow fields on the exact active issue without retrospective contract ceremony.
 - Configured Linear destinations produce create/update plans and persist result metadata.
 - pi-linear reads, writes, destructive tools, workspace switching, and unknown tools classify correctly.
 - Third-party `linear_*` tools pass through the same interception boundary.
