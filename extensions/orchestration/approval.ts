@@ -31,13 +31,18 @@ const AMBIGUOUS_ACKNOWLEDGEMENTS = new Set([
 
 export function isCompletionDirective(text: string): boolean {
   const normalized = normalizeApprovalText(text);
-  const negated = /\b(?:do not|don t|never|not)\b.*\b(?:mark|complete|close)\b/.test(normalized);
-  return !negated && !/^(?:should|shall) (?:we|i)\b/.test(normalized) && /\b(?:mark (?:it )?done|complete (?:it|the issue)|close (?:it|the issue))\b/.test(normalized);
+  const mutation = "(?:mark|complete|close|set|move|update|change)";
+  const outcome = "(?:done|complete|completed|closed)";
+  const negated = new RegExp(`\\b(?:do not|don t|never|not)\\b.*\\b${mutation}\\b`).test(normalized);
+  const deliberative = /^(?:should|shall) (?:we|i)\b/.test(normalized);
+  const direct = /\b(?:mark (?:it )?done|complete (?:it|the issue)|close (?:it|the issue))\b/.test(normalized);
+  const workflow = new RegExp(`\\b${mutation}\\b.{0,100}\\b(?:to |as |already )?${outcome}\\b`).test(normalized);
+  return !negated && !deliberative && (direct || workflow);
 }
 
 export function classifyApprovalIntent(text: string): ApprovalIntent {
   const normalized = normalizeApprovalText(text);
-  if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|implement|proceed|continue|ship|mark)\b/.test(normalized)) return "none";
+  if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|implement|proceed|continue|ship|mark|complete|close|set|move|update|change)\b/.test(normalized)) return "none";
   if (/^(?:should|shall) (?:we|i)\b/.test(normalized)) return "none";
   if (/\b(?:approve|approved|accept|accepted)\b/.test(normalized)) return "explicit";
   if (/\b(?:get it done|do it|implement it|start implementation|ship it|make it happen|mark (?:it )?done)\b/.test(normalized)) return "explicit";
