@@ -5,6 +5,7 @@ import {
   authorizeLinearTool,
   classifyLinearTool,
   collectCompletedStatusIds,
+  collectLinearResourceAliases,
   isLinearMcpRoute,
 } from "../extensions/orchestration/linear-policy.ts";
 import type { InitiativeState } from "../extensions/orchestration/types.ts";
@@ -48,6 +49,16 @@ test("allows only reads during contract design", () => {
   assert.equal(authorizeLinearTool("linear_update_issue", { issue: "issue-1" }, { initiative: design }).allowed, false);
 });
 
+test("collects read-proven Linear names, keys, and canonical IDs", () => {
+  const aliases = collectLinearResourceAliases({ teams: [{ id: "team-uuid", key: "DEMO", name: "Demo Team" }], projects: [{ id: "project-uuid", name: "Public Launch" }] });
+  assert.equal(aliases.get("Demo Team"), "team-uuid");
+  assert.equal(aliases.get("demo"), "team-uuid");
+  assert.equal(aliases.get("Public Launch"), "project-uuid");
+  assert.equal(collectLinearResourceAliases([{ type: "text", text: JSON.stringify({ id: "p2", name: "Second Project" }) }]).get("Second Project"), "p2");
+  const ambiguous = collectLinearResourceAliases([{ id: "p1", name: "Duplicate" }, { id: "p2", name: "Duplicate" }]);
+  assert.equal(ambiguous.get("Duplicate"), "");
+});
+
 test("collects only completed workflow statuses from pi-linear results", () => {
   assert.deepEqual([...collectCompletedStatusIds({ data: { statuses: [
     { id: "started", name: "In Progress", type: "started" },
@@ -81,6 +92,15 @@ test("prevents generic MCP and third-party Linear write bypass", () => {
   assert.equal(isLinearMcpRoute("linear", "update_issue"), true);
   assert.equal(isLinearMcpRoute("other", "linear_update_issue"), true);
   assert.equal(authorizeLinearTool("linear_save_project", {}, { initiative: initiative({ issueId: "issue-1" }) }).allowed, false);
+});
+
+test("allows read-proven canonical team/project IDs without contract reapproval", () => {
+  const active = initiative({ team: "Demo Team" });
+  active.contract!.linear.project = "Public Launch";
+  const aliases = collectLinearResourceAliases({ teams: [{ id: "team-uuid", key: "DEMO", name: "Demo Team" }], projects: [{ id: "project-uuid", name: "Public Launch" }] });
+  const args = { teamKey: "DEMO", projectId: "project-uuid", title: "Export report", description: "<!-- pi-contract:start -->approved<!-- pi-contract:end -->" };
+  assert.equal(authorizeLinearTool("linear_create_issue", args, { initiative: active, allowCreateIssue: true, resourceAliases: aliases }).allowed, true);
+  assert.equal(authorizeLinearTool("linear_create_issue", args, { initiative: active, allowCreateIssue: true }).allowed, false);
 });
 
 test("allows issue creation only for the armed approved destination", () => {

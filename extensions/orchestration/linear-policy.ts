@@ -22,10 +22,34 @@ export function hasLinearDestination(contract: FeatureOrBugContract): boolean {
   return Boolean(contract.linear.issueId || contract.linear.issueIdentifier || contract.linear.team);
 }
 
-export function collectCompletedStatusIds(value: unknown, result = new Set<string>()): Set<string> {
-  if (typeof value === "string" && /^[\[{]/.test(value.trim())) {
-    try { return collectCompletedStatusIds(JSON.parse(value), result); } catch { return result; }
+function parsedLinearValue(value: unknown): unknown {
+  if (typeof value !== "string" || !/^[\[{]/.test(value.trim())) return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+export function collectLinearResourceAliases(value: unknown, result = new Map<string, string>()): Map<string, string> {
+  value = parsedLinearValue(value);
+  if (!value || typeof value !== "object") return result;
+  if (Array.isArray(value)) { for (const item of value) collectLinearResourceAliases(item, result); return result; }
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" ? record.id : undefined;
+  if (id) {
+    for (const key of ["id", "name", "key", "identifier"] as const) {
+      const alias = typeof record[key] === "string" ? record[key].trim() : "";
+      if (alias) {
+        for (const candidate of new Set([alias, alias.toLowerCase()])) {
+          const existing = result.get(candidate);
+          result.set(candidate, existing && existing !== id ? "" : id);
+        }
+      }
+    }
   }
+  for (const item of Object.values(record)) collectLinearResourceAliases(item, result);
+  return result;
+}
+
+export function collectCompletedStatusIds(value: unknown, result = new Set<string>()): Set<string> {
+  value = parsedLinearValue(value);
   if (!value || typeof value !== "object") return result;
   if (Array.isArray(value)) { for (const item of value) collectCompletedStatusIds(item, result); return result; }
   const record = value as Record<string, unknown>;
@@ -54,12 +78,26 @@ function hasOnlyKeys(args: Record<string, unknown>, allowed: string[]): boolean 
   return Object.keys(args).every((key) => keys.has(key));
 }
 
+function resolvedLinearId(value: string, aliases?: ReadonlyMap<string, string>): string | undefined {
+  return aliases?.get(value) || aliases?.get(value.toLowerCase()) || undefined;
+}
+
+function sameLinearResource(expected: string, actual: string, aliases?: ReadonlyMap<string, string>): boolean {
+  const expectedId = resolvedLinearId(expected, aliases);
+  const actualId = resolvedLinearId(actual, aliases);
+  return expectedId ? expectedId === (actualId ?? actual) : expected === actual;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export interface LinearPolicyContext {
   initiative?: InitiativeState;
   allowCreateIssue?: boolean;
   /** One-turn capability created by a direct operator request such as “mark it done”. */
   allowWorkflowUpdate?: boolean;
   completedStatusIds?: ReadonlySet<string>;
+  /** Canonical IDs proven by pi-linear read results in this session. */
+  resourceAliases?: ReadonlyMap<string, string>;
 }
 
 export function authorizeLinearTool(
@@ -95,15 +133,22 @@ export function authorizeLinearTool(
       return { allowed: false, reason: "Issue creation is allowed only for pending approved-contract persistence" };
     }
     const expectedTeam = initiative.contract.linear.team;
-    const actualTeam = stringAt(args, ["teamId", "teamKey"]);
-    if (!expectedTeam || actualTeam !== expectedTeam) {
-      return { allowed: false, reason: "Issue creation must target the contract's configured Linear team" };
+    const teamId = stringAt(args, ["teamId"]);
+    const teamKey = stringAt(args, ["teamKey"]);
+    const actualTeam = teamId ?? teamKey;
+    const unresolvedTeamIsCanonical = teamId ? UUID.test(teamId) : Boolean(teamKey && /^[A-Z][A-Z0-9_-]*$/.test(teamKey));
+    if (!expectedTeam || !actualTeam || !sameLinearResource(expectedTeam, actualTeam, context.resourceAliases) || (!resolvedLinearId(expectedTeam, context.resourceAliases) && !unresolvedTeamIsCanonical)) {
+      return { allowed: false, reason: "Issue creation must target the configured team using a read-proven teamId/teamKey, never a display name" };
     }
     if (!hasOnlyKeys(args, ["teamId", "teamKey", "projectId", "title", "description"])) {
       return { allowed: false, reason: "Issue creation contains fields outside approved contract persistence" };
     }
-    if (initiative.contract.linear.project && args.projectId !== initiative.contract.linear.project) {
-      return { allowed: false, reason: "Issue creation must target the contract's configured Linear project" };
+    if (initiative.contract.linear.project) {
+      const projectId = typeof args.projectId === "string" ? args.projectId : "";
+      const resolvedProject = resolvedLinearId(initiative.contract.linear.project, context.resourceAliases);
+      if (!projectId || !sameLinearResource(initiative.contract.linear.project, projectId, context.resourceAliases) || (!resolvedProject && !UUID.test(projectId))) {
+        return { allowed: false, reason: "Issue creation must target the configured project using a read-proven canonical projectId, never a display name" };
+      }
     }
     if (args.title !== initiative.contract.title || typeof args.description !== "string" || !args.description.includes("<!-- pi-contract:start -->")) {
       return { allowed: false, reason: "Issue creation must contain the approved contract title and managed description" };

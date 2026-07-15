@@ -68,12 +68,14 @@ Approval records distinguish:
 
 ## Optional Linear persistence
 
-For a configured destination, the approval result provides an exact tool name and arguments:
+For a configured destination, the approval result provides a tool name, approved title/body, and destination scope:
 
 - `linear_create_issue` with the approved title, managed contract body, and configured team; or
 - `linear_update_issue` with the active issue and managed contract body.
 
-Successful tool results update local approval state to `persisted`. The managed body is delimited by `<!-- pi-contract:start -->` and `<!-- pi-contract:end -->`. Operators can inspect the target issue before update when preservation of unrelated description text is needed.
+Human destination names are not copied blindly into ID fields. Immediately before writing, the agent uses pi-linear list/get tools to resolve canonical `teamId`, `teamKey`, `projectId`, `stateId`, or other schema-specific references. The policy records name/key/ID aliases from those read results and accepts a canonical substitution only when both representations resolve to the same resource. This operational normalization does not alter approved scope, contract hash, or version and therefore does not require reapproval. Every write is followed by an issue readback.
+
+Successful persistence tool results update local approval state to `persisted`; the agent still performs readback before reporting success to the operator. The managed body is delimited by `<!-- pi-contract:start -->` and `<!-- pi-contract:end -->`. Operators can inspect the target issue before update when preservation of unrelated description text is needed.
 
 V1 does not invoke a private API client. pi-linear owns credential resolution and API communication.
 

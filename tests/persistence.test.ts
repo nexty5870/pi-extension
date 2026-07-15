@@ -30,6 +30,13 @@ test("keeps optional Linear persistence when a destination is configured", () =>
   const createPlan = planLinearPersistence(contract({ team: "DEMO" }), approvedAt);
   assert.equal(createPlan?.toolName, "linear_create_issue");
   assert.equal(createPlan?.arguments.teamKey, "DEMO");
+  const unresolved = planLinearPersistence(contractFromInput({
+    kind: "feature", title: "Named destination", linear: { team: "Demo Team", project: "Public Launch" },
+    outcome: "Resolve IDs", context: "Names are human-friendly", inScope: ["Issue"], acceptanceCriteria: ["Created"], validation: ["Test"],
+  }), approvedAt);
+  assert.equal(unresolved?.arguments.teamKey, undefined);
+  assert.equal(unresolved?.arguments.projectId, undefined);
+  assert.deepEqual(unresolved?.destination, { team: "Demo Team", project: "Public Launch" });
 
   const updatePlan = planLinearPersistence(contract({ issueId: "issue-123" }), approvedAt);
   assert.equal(updatePlan?.toolName, "linear_update_issue");
