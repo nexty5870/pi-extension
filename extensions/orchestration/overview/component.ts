@@ -2,12 +2,16 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { InitiativeState, ProjectContext, UsageRecord } from "../types.ts";
 import { aggregateUsage, formatTokenCount } from "../usage.ts";
+import type { DeliveryState } from "../delivery/types.ts";
+import { workerLines } from "../delivery/ui.ts";
 
 const VIEWS = ["Projects", "Initiatives", "Workers", "Usage", "Action inbox"] as const;
 type ViewIndex = 0 | 1 | 2 | 3 | 4;
 
 export class TeamOverviewComponent {
   private view: ViewIndex = 0;
+  private scroll = 0;
+  private readonly refreshTimer: NodeJS.Timeout;
 
   constructor(
     private readonly project: ProjectContext,
@@ -15,10 +19,16 @@ export class TeamOverviewComponent {
     private readonly initiatives: InitiativeState[],
     private readonly usage: UsageRecord[],
     private readonly contextPercent: number | undefined,
+    private readonly delivery: DeliveryState | undefined,
     private readonly theme: Theme,
     private readonly close: () => void,
     private readonly requestRender: () => void,
-  ) {}
+  ) {
+    this.refreshTimer = setInterval(requestRender, 1_000);
+    this.refreshTimer.unref();
+  }
+
+  dispose(): void { clearInterval(this.refreshTimer); }
 
   handleInput(data: string): void {
     if (data === "q" || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
@@ -30,7 +40,9 @@ export class TeamOverviewComponent {
     else if (matchesKey(data, Key.tab)) this.view = ((this.view + 1) % VIEWS.length) as ViewIndex;
     else if (matchesKey(data, Key.shift("tab"))) {
       this.view = ((this.view + VIEWS.length - 1) % VIEWS.length) as ViewIndex;
-    } else return;
+    } else if (matchesKey(data, Key.up)) this.scroll = Math.max(0, this.scroll - 1);
+    else if (matchesKey(data, Key.down)) this.scroll += 1;
+    else return;
     this.requestRender();
   }
 
@@ -92,13 +104,11 @@ export class TeamOverviewComponent {
 
   private inboxLines(): string[] {
     const t = this.theme;
-    const actions = this.initiatives.filter((item) => item.status === "review");
-    return actions.length === 0
-      ? [t.fg("success", "No operator action required.")]
-      : [
-          t.fg("accent", t.bold("Action inbox")),
-          ...actions.map((item) => `${t.fg("warning", "REVIEW")} ${item.contract?.title ?? item.initiativeId}\n  ${t.fg("dim", item.contractPath ?? "contract path unavailable")}`),
-        ];
+    const contractActions = this.initiatives.filter((item) => item.status === "review")
+      .map((item) => `${t.fg("warning", "REVIEW")} ${item.contract?.title ?? item.initiativeId}\n  ${t.fg("dim", item.contractPath ?? "contract path unavailable")}`);
+    const deliveryActions = (this.delivery?.actions ?? []).map((item) => `${t.fg(item.severity === "critical" ? "error" : "warning", item.severity.toUpperCase())} ${item.message}`);
+    const actions = [...contractActions, ...deliveryActions];
+    return actions.length === 0 ? [t.fg("success", "No operator action required.")] : [t.fg("accent", t.bold("Action inbox")), ...actions];
   }
 
   render(width: number): string[] {
@@ -107,7 +117,7 @@ export class TeamOverviewComponent {
       : this.view === 1
         ? this.initiativeLines()
         : this.view === 2
-          ? [this.theme.fg("dim", "No workers in V1. Mutating workers begin in V2.")]
+          ? workerLines(this.delivery)
           : this.view === 3
             ? this.usageLines()
             : this.inboxLines();
@@ -115,9 +125,9 @@ export class TeamOverviewComponent {
       this.theme.fg("accent", this.theme.bold(" Pi Team Overview ")),
       this.navigation(),
       "",
-      ...body,
+      ...body.slice(this.scroll),
       "",
-      this.theme.fg("dim", "1-5/Tab change view · q/Escape close · read-only"),
+      this.theme.fg("dim", "1-5/Tab change · ↑/↓ scroll · q/Escape close · read-only"),
     ];
     return lines.flatMap((line) => line.split("\n")).map((line) => truncateToWidth(line, Math.max(1, width)));
   }

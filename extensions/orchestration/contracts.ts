@@ -6,6 +6,7 @@ import type {
   InitiativeState,
   LinearDestination,
   ProjectContext,
+  DeliveryMetadata,
 } from "./types.ts";
 
 export interface ContractDraftInput {
@@ -13,6 +14,7 @@ export interface ContractDraftInput {
   title: string;
   version?: number;
   linear?: Partial<LinearDestination>;
+  delivery?: Partial<DeliveryMetadata>;
   outcome?: string;
   context?: string;
   inScope?: string[];
@@ -47,6 +49,16 @@ export function contractFromInput(input: ContractDraftInput): FeatureOrBugContra
     issueId: clean(input.linear?.issueId) || undefined,
     issueIdentifier: clean(input.linear?.issueIdentifier) || undefined,
   };
+  const delivery = input.delivery
+    ? {
+        baseBranch: clean(input.delivery.baseBranch),
+        branchName: clean(input.delivery.branchName),
+        commitMessage: clean(input.delivery.commitMessage),
+        prTitle: clean(input.delivery.prTitle),
+        prBody: clean(input.delivery.prBody),
+        checks: (input.delivery.checks ?? []).map((check) => cleanList(check)),
+      }
+    : undefined;
 
   if (input.kind === "feature") {
     return {
@@ -54,6 +66,7 @@ export function contractFromInput(input: ContractDraftInput): FeatureOrBugContra
       title: clean(input.title),
       version: input.version ?? 1,
       linear,
+      delivery,
       outcome: clean(input.outcome),
       context: clean(input.context),
       inScope: cleanList(input.inScope),
@@ -72,6 +85,7 @@ export function contractFromInput(input: ContractDraftInput): FeatureOrBugContra
     title: clean(input.title),
     version: input.version ?? 1,
     linear,
+    delivery,
     impact: clean(input.impact),
     environment: clean(input.environment),
     reproductionSteps: cleanList(input.reproductionSteps),
@@ -93,6 +107,20 @@ export function validateContract(contract: FeatureOrBugContract): string[] {
   if (!Number.isInteger(contract.version) || contract.version < 1) {
     errors.push("version must be a positive integer");
   }
+  if (contract.delivery) {
+    const delivery = contract.delivery;
+    if (!delivery.baseBranch) errors.push("delivery base branch is required");
+    if (!/^[-A-Za-z0-9._/]+$/.test(delivery.branchName) || delivery.branchName.startsWith("-") || delivery.branchName.includes("..")) {
+      errors.push("delivery branch name is unsafe");
+    }
+    if (!delivery.commitMessage) errors.push("delivery commit message is required");
+    if (!delivery.prTitle) errors.push("delivery PR title is required");
+    if (!delivery.prBody) errors.push("delivery PR body is required");
+    if (delivery.checks.length === 0 || delivery.checks.some((check) => check.length === 0 || check.some((arg) => !arg || arg.includes("\0")))) {
+      errors.push("delivery checks must be non-empty argv arrays");
+    }
+  }
+
   if (contract.kind === "feature") {
     if (!contract.outcome) errors.push("feature outcome is required");
     if (!contract.context) errors.push("feature context is required");
@@ -164,9 +192,15 @@ export function parseContractMarkdown(
       .filter((line) => line && line !== "None identified" && line !== "Not yet provided");
   };
 
+  const deliverySection = sections.get("delivery");
+  const delivery = deliverySection === undefined
+    ? original.delivery
+    : parseDeliverySection(deliverySection, original.delivery);
+
   if (original.kind === "feature") {
     return {
       ...original,
+      delivery,
       title,
       version,
       outcome: text("outcome and user value", original.outcome),
@@ -185,6 +219,7 @@ export function parseContractMarkdown(
   const suspectedArea = text("suspected area", original.suspectedArea ?? "");
   return {
     ...original,
+    delivery,
     title,
     version,
     impact: text("impact", original.impact),
@@ -202,10 +237,40 @@ export function parseContractMarkdown(
   };
 }
 
+function renderDelivery(delivery: DeliveryMetadata | undefined): string {
+  if (!delivery) return "";
+  return `\n## Delivery\n\n` +
+    `- Base branch: \`${delivery.baseBranch}\`\n` +
+    `- Branch: \`${delivery.branchName}\`\n` +
+    `- Commit: ${delivery.commitMessage}\n` +
+    `- PR title: ${delivery.prTitle}\n` +
+    `- PR body (JSON): ${JSON.stringify(delivery.prBody)}\n` +
+    `- Checks (JSON): ${JSON.stringify(delivery.checks)}\n`;
+}
+
+function parseDeliverySection(section: string, fallback?: DeliveryMetadata): DeliveryMetadata | undefined {
+  const field = (name: string) => section.match(new RegExp(`^- ${name}: (.+)$`, "mi"))?.[1]?.trim();
+  const unquote = (value: string | undefined) => value?.replace(/^`|`$/g, "") ?? "";
+  try {
+    const body = field("PR body \\(JSON\\)");
+    const checks = field("Checks \\(JSON\\)");
+    return {
+      baseBranch: unquote(field("Base branch")) || fallback?.baseBranch || "",
+      branchName: unquote(field("Branch")) || fallback?.branchName || "",
+      commitMessage: field("Commit") || fallback?.commitMessage || "",
+      prTitle: field("PR title") || fallback?.prTitle || "",
+      prBody: body ? JSON.parse(body) : fallback?.prBody || "",
+      checks: checks ? JSON.parse(checks) : fallback?.checks || [],
+    };
+  } catch {
+    return { baseBranch: "", branchName: "", commitMessage: "", prTitle: "", prBody: "", checks: [] };
+  }
+}
+
 export function renderContract(contract: FeatureOrBugContract): string {
   const header = `# ${contract.kind === "feature" ? "Feature" : "Bug"} Contract: ${contract.title}\n\n` +
     `**Contract version:** ${contract.version}\n\n` +
-    `## Linear destination\n\n${destination(contract)}\n`;
+    `## Linear destination\n\n${destination(contract)}\n` + renderDelivery(contract.delivery);
 
   if (contract.kind === "feature") {
     return `${header}

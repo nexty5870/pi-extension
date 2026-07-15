@@ -42,7 +42,21 @@ Useful optional commands:
 /team-close                   Close local state only
 ```
 
-V1 records approval and optionally persists the contract through pi-linear, then stops before delivery-worker code mutation.
+Approved contracts with a `Delivery` section can enter the explicit delivery phase. Delivery metadata fixes the base branch, work branch, commit message, PR title/body, and argv-based checks into the approved hash.
+
+```text
+/team-delivery start          Start from a fresh matching approval
+/team-delivery show           Inspect durable delivery state
+/team-delivery resume         Reconcile and resume a retained run
+/team-delivery abort          Stop workers and retain diagnostics
+/team-delivery cleanup        Confirm deletion of failed/aborted private state only
+```
+
+Delivery requires a clean synchronized Git repository with `origin`, an authenticated GitHub CLI, a public repository, and caller-provided `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`. It creates one right-side Team pane and separate implementer/reviewer surfaces with focus disabled. Worker subprocesses run in an isolated worktree with a trusted path/tool guard; role logs and state stay private under `~/.pi/team-orchestration/`.
+
+The controller permits one implementer and one independent reviewer, caps review at three passes, runs approved checks without a shell plus `git diff --check`, scans the publication diff, commits and pushes without force, reconciles one PR, observes bounded CI state, and stops. It never merges, deploys, deletes branches/remotes, or automatically removes a successful worktree. Failures retain state for `/team-delivery resume`; cleanup is explicit and never removes Git or cmux resources.
+
+The compact footer preserves model, branch, and unrelated extension statuses while adding context level, initiative state, workers, and action count. `/team-overview` is live, scrollable, and includes worker/check/action state. Context colors change at 60% and 80%; no automatic compaction occurs.
 
 #### Generic MCP configuration (non-Linear only)
 

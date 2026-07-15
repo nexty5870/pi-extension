@@ -17,3 +17,9 @@ Linear authentication is owned by [`@alasano/pi-linear`](https://github.com/alas
 The optional `~/.pi/team-orchestration/mcp.json` is only for non-Linear MCP servers. Keep private static headers there with `0600` permissions and never commit the file. Existing files are not exposed or migrated automatically.
 
 All `linear_*` tool calls are intercepted regardless of which third-party extension registered them. Reads are limited by prefix; approved writes are active-issue scoped; destructive, workspace-switching, unrelated resource mutations, and unknown tools are blocked.
+
+## Delivery workers and publication
+
+Delivery workers run with extension/skill discovery disabled and a trusted guard loaded explicitly. The guard confines file tools to the canonical worktree, validates symlinks, denies sensitive filenames, strips Linear credentials, blocks Linear/MCP access, prevents worker push/merge/deploy commands, and makes reviewers read-only. Private prompts, logs, reviews, checks, and state use `0600` files outside the repository.
+
+Before publication, the controller checks public GitHub visibility and scans changed files for sensitive names, credential patterns, private absolute paths, file-count limits, and file-size limits. Git and GitHub operations use argv execution without a shell, never force-push, and never invoke merge, deployment, branch deletion, remote deletion, or automatic successful-worktree cleanup. cmux operations target the caller workspace and use focus-disabled creation; surfaces are display-only rather than an orchestration control protocol.

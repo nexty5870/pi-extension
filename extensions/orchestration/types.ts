@@ -9,11 +9,22 @@ export interface LinearDestination {
   issueIdentifier?: string;
 }
 
+export interface DeliveryMetadata {
+  baseBranch: string;
+  branchName: string;
+  commitMessage: string;
+  prTitle: string;
+  prBody: string;
+  /** Executable plus arguments. Commands are never interpreted by a shell. */
+  checks: string[][];
+}
+
 interface ContractBase {
   kind: ContractKind;
   title: string;
   version: number;
   linear: LinearDestination;
+  delivery?: DeliveryMetadata;
 }
 
 export interface FeatureContract extends ContractBase {
