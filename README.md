@@ -6,6 +6,50 @@ The repository is intentionally public-safe: it does not contain credentials, se
 
 ## Included extensions
 
+### Pi team orchestration (V1 foundation)
+
+A global CTO/orchestration layer that keeps Pi's native sessions and cmux project workspaces intact.
+
+Current foundation:
+
+- Conversational Feature and Bug contract design with private local snapshots
+- Optional Linear destinations; local-only contracts report **“GitHub/docs-only; no Linear mutation.”**
+- Case- and punctuation-tolerant explicit approval, with confirmation for ambiguous acknowledgements
+- [`@alasano/pi-linear`](https://pi.dev/packages/@alasano/pi-linear?name=linear) for Linear reads and approved contract persistence
+- A generic, non-Linear MCP bridge with static headers and deny-by-default allowlists
+- Read-only scouts, native session names, usage records, and `/team-overview`
+
+Install the companion Linear package globally (unversioned so Pi can update it):
+
+```bash
+pi install npm:@alasano/pi-linear
+```
+
+Authenticate only through the operator-controlled `/linear-auth` command and configure tools through `/linear-settings`. Never paste an API key into chat, this repository, or orchestration MCP configuration. See the [package source and documentation](https://github.com/alasano/house-of-pi/tree/master/packages/pi-linear).
+
+Design can use only `linear_list_*`, `linear_get_*`, and `linear_search_*`. After explicit approval, issue creation or update/comment operations are restricted to the configured active issue. Delete/archive operations, project or document mutations, workspace switching by the agent, and unknown `linear_*` tools are blocked.
+
+Approval does not require a magic phrase. Unambiguous variants include “Approve contract and start implementation”, “approved, implement”, and “go ahead and implement”. Vague replies such as “ok” and “looks good” trigger a confirmation request.
+
+Useful optional commands:
+
+```text
+/team-init                    Show detected Git/cmux project context
+/team-contract show|open|reload
+/team-feature [idea]          Prefill a design request
+/team-scout [task]            Prefill a read-only scout request
+/team-overview                Open the read-only overlay
+/team-close                   Close local state only
+```
+
+V1 records approval and optionally persists the contract through pi-linear, then stops before delivery-worker code mutation.
+
+#### Generic MCP configuration (non-Linear only)
+
+The generic bridge remains available for other MCP servers. Copy [`examples/mcp.example.json`](examples/mcp.example.json) manually to `~/.pi/team-orchestration/mcp.json` if needed. Static headers remain supported. The extension never reads, prints, migrates, or rewrites credentials except to tighten that file's mode to `0600` when explicitly loaded. Linear servers are rejected; do not send a personal API key to `https://mcp.linear.app/mcp`.
+
+See [`docs/orchestration-design.md`](docs/orchestration-design.md) for the design and roadmap.
+
 ### `/update`
 
 Update Pi with its supported self-update command and restart the current TUI in place.
@@ -40,6 +84,7 @@ Failed updates leave the existing TUI running and display the update output.
 - Pi.dev coding agent
 - Node.js 22.15 or newer (`process.execve()` support)
 - An installation that Pi can update with `pi update --self`
+- Zed CLI (`zed`) only when using `/team-contract open`
 
 ## Installation
 
