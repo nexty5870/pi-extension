@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The extension adds a deterministic contract-review boundary to Pi while retaining native sessions, Git repositories, and cmux workspaces. V1 designs and approves work; it does not run delivery workers or mutate project code.
+The extension adds deterministic contract review and a bounded delivery state machine to Pi while retaining native sessions, Git repositories, and caller-owned cmux workspaces. Delivery remains explicit and always stops before merge or deployment.
 
 ## Principles
 
@@ -127,9 +127,23 @@ State is partitioned by stable Git-root project ID and initiative ID. Atomic fil
 
 `/team-overview` is a read-only overlay. `/team-close` changes local state only and never contacts Linear.
 
-## V1 safety boundaries
+## Delivery-worker milestone
 
-While an initiative is active, the CTO session blocks project `write`, `edit`, and shell mutation. Read-only scouts run in isolated Pi subprocesses. V1 does not create branches, worktrees, commits, PRs, merges, or deployments.
+Deliverable contracts add hash-covered metadata for the base branch, work branch, commit message, PR title/body, and validation argv arrays. `/team-delivery start` requires a current approval hash, completed optional Linear persistence, a clean synchronized base, a public GitHub repository, and authoritative caller cmux IDs.
+
+The durable phases are preflight, worktree creation, implementation, review, checks, commit, push, PR reconciliation, bounded CI observation, and operator action. State, logs, prompts, reviews, checks, and usage are atomically stored with `0600` permissions under an initiative-specific delivery run. Exclusive locks prevent concurrent execution. Resume reconciles immutable base/worktree/commit/push/PR identities and fails closed on mismatches.
+
+One implementer and one reviewer run as isolated Pi JSON subprocesses. Discovered extensions and skills are disabled; repository context remains trusted; an explicitly loaded guard confines paths and symlinks, denies sensitive files, strips Linear access, prevents publication/deployment commands, and makes the reviewer read-only. Reviewer output is strict JSON bound to the exact diff hash. Three requested-change passes exhaust the run.
+
+Approved checks execute as argv without a shell, followed by `git diff --check`. A check-mutated diff requires another independent review. The final reviewed hash must equal the publication diff. A public-safety scan checks changed paths and content before staging.
+
+Git publication never force-pushes. GitHub publication requires public visibility, reconciles at most one exact PR, observes CI to a bounded terminal state, and stops with an operator action. Merge, deployment, branch/remote deletion, and automatic successful-worktree removal do not exist in the controller.
+
+cmux topology is one right-side Team pane with implementer/reviewer terminal surfaces created using the exact caller workspace and `--focus false`. State remains the control protocol; cmux only displays/coalesces status, progress, and flashes.
+
+The shared UI snapshot powers a compact footer and scrollable overview. Context is normal below 60%, warning from 60–79%, and critical from 80%; compaction is never automatic. Model, Git branch, and unrelated extension statuses remain visible.
+
+The CTO design session itself still blocks project mutation. Read-only scouts remain isolated. Delivery mutation occurs only in the controller-created worktree after explicit start.
 
 ## Configuration example
 
@@ -137,7 +151,10 @@ While an initiative is active, the CTO session blocks project `write`, `edit`, a
 
 ## Classic TODO
 
-- [ ] Delivery-worker phase: after a fresh approved execution handoff, add isolated worktrees, worker/reviewer loops, commits, GitHub PR creation, check monitoring, and operator-controlled merge/deploy. Keep workers unable to mutate Linear directly.
+- [ ] Dogfood delivery end-to-end on a disposable public fixture in cmux, including an actual test PR and visual focus-theft verification, before enabling it on any sensitive repository.
+- [ ] Add opt-in handling for post-publication CI failures; keep every code change behind a new review/check cycle.
+- [ ] Consider parallel/distributed workers only after the single implementer/reviewer state machine has production evidence.
+- [ ] Keep merge, deploy, and destructive cleanup operator-controlled.
 
 ## Acceptance checks
 
@@ -148,4 +165,7 @@ While an initiative is active, the CTO session blocks project `write`, `edit`, a
 - pi-linear reads, writes, destructive tools, workspace switching, and unknown tools classify correctly.
 - Third-party `linear_*` tools pass through the same interception boundary.
 - Generic MCP static headers still reach its HTTP transport while Linear MCP routes are rejected.
+- Delivery metadata validates, round-trips, and participates in contract hashing.
+- Faked controller paths cover success, requested changes, exhaustion, check failure/mutation, drift, and publication reconciliation without live services.
+- Temporary Git fixtures cover clean-base/worktree/collision gates; guard, reviewer, scanner, cmux, GitHub, JSONL, cancellation, and responsive UI policies have regressions.
 - `npm test`, `npm run typecheck`, and `git diff --check` pass.

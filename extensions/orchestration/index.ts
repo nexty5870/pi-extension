@@ -28,6 +28,15 @@ import {
 } from "./session-state.ts";
 import { OrchestrationStore } from "./store.ts";
 import { approveContractLocally, planLinearPersistence } from "./persistence.ts";
+import { ArgvCommandRunner } from "./delivery/command.ts";
+import { GitAdapter } from "./delivery/git.ts";
+import { GitHubAdapter } from "./delivery/github.ts";
+import { CmuxAdapter } from "./delivery/cmux.ts";
+import { DeliveryController } from "./delivery/controller.ts";
+import { DeliveryStore } from "./delivery/store.ts";
+import { runDeliveryWorker } from "./delivery/worker.ts";
+import { renderTeamFooter, type TeamUiSnapshot } from "./delivery/ui.ts";
+import type { DeliveryState } from "./delivery/types.ts";
 import type { InitiativeState, ProjectContext } from "./types.ts";
 
 const APPROVAL_EXAMPLE = "Approve contract and start implementation";
@@ -45,6 +54,14 @@ const ContractDraftParams = Type.Object({
     project: optionalString(),
     issueId: optionalString(),
     issueIdentifier: optionalString(),
+  })),
+  delivery: Type.Optional(Type.Object({
+    baseBranch: Type.String(),
+    branchName: Type.String(),
+    commitMessage: Type.String(),
+    prTitle: Type.String(),
+    prBody: Type.String(),
+    checks: Type.Array(Type.Array(Type.String(), { minItems: 1 }), { minItems: 1 }),
   })),
   outcome: optionalString(),
   context: optionalString(),
@@ -107,6 +124,10 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   let approvalArmed = false;
   let approvalIntent: ApprovalIntent = "none";
   let linearCreateArmed = false;
+  let delivery: DeliveryState | undefined;
+  let activeDeliveryAbort: AbortController | undefined;
+  const uiSnapshot: TeamUiSnapshot = {};
+  let requestFooterRender: (() => void) | undefined;
 
   const requireProject = (): ProjectContext => {
     if (!project) throw new Error("Project context is not initialized");
@@ -129,8 +150,20 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     await store.writeInitiative(state);
     persistInitiativeEntry(pi, state);
     initiative = state;
+    uiSnapshot.initiativeState = state.status;
     const name = initiativeSessionName(state);
     if (name && pi.getSessionName() !== name) pi.setSessionName(name);
+  };
+
+  const verifyApprovedContractFile = async (): Promise<void> => {
+    if (!initiative?.contract || !initiative.approved) throw new Error("No approved contract is active");
+    const markdown = await readFile(initiative.contractPath ?? store.contractPath(initiative), "utf8");
+    const reviewMarkdown = markdown.split(/\n---\n\n\*\*Approved at:\*\*/)[0] ?? markdown;
+    const current = parseContractMarkdown(reviewMarkdown, initiative.contract);
+    const errors = validateContract(current);
+    if (errors.length) throw new Error(`Current contract is invalid:\n- ${errors.join("\n- ")}`);
+    if (contractHash(current) !== initiative.approved.contentHash) throw new Error("Current contract Markdown has drifted from the approved hash");
+    initiative.contract = current;
   };
 
   const reloadContract = async (): Promise<InitiativeState> => {
@@ -153,16 +186,37 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     approvalIntent = "none";
     linearCreateArmed = false;
     if (initiative) {
+      delivery = await new DeliveryStore(store.initiativeDir(initiative)).latest();
+      uiSnapshot.delivery = delivery;
+      uiSnapshot.initiativeState = initiative.status;
       const name = initiativeSessionName(initiative);
       if (name && !pi.getSessionName()) pi.setSessionName(name);
       ctx.ui.setStatus("team-orchestration", `${initiative.status}: ${initiative.contract?.title ?? "initiative"}`);
     } else {
+      delivery = undefined;
+      uiSnapshot.delivery = undefined;
+      uiSnapshot.initiativeState = undefined;
       ctx.ui.setStatus("team-orchestration", `CTO · ${project.projectName}`);
+    }
+    if (ctx.mode === "tui") {
+      ctx.ui.setFooter((tui, theme, footerData) => {
+        requestFooterRender = () => tui.requestRender();
+        const unsubscribe = footerData.onBranchChange(requestFooterRender);
+        return {
+          dispose: () => { unsubscribe(); requestFooterRender = undefined; },
+          invalidate() {},
+          render: (width) => renderTeamFooter(width, theme, ctx.model?.id ?? "no-model", footerData.getGitBranch(), footerData.getExtensionStatuses(), uiSnapshot),
+        };
+      });
     }
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     initiative = restoreInitiative(ctx);
+    delivery = initiative ? await new DeliveryStore(store.initiativeDir(initiative)).latest() : undefined;
+    uiSnapshot.initiativeState = initiative?.status;
+    uiSnapshot.delivery = delivery;
+    requestFooterRender?.();
     approvalArmed = false;
     approvalIntent = "none";
     linearCreateArmed = false;
@@ -172,6 +226,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     approvalArmed = false;
     approvalIntent = "none";
     linearCreateArmed = false;
+    activeDeliveryAbort?.abort();
+    activeDeliveryAbort = undefined;
     await manager?.close();
     manager = undefined;
   });
@@ -260,12 +316,10 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (event, ctx) => {
     const usage = ctx.getContextUsage();
-    if (usage && usage.tokens !== null) {
-      ctx.ui.setStatus(
-        "team-context",
-        `context ${Math.round((usage.tokens / usage.contextWindow) * 100)}%`,
-      );
-    }
+    uiSnapshot.contextPercent = usage && usage.tokens !== null
+      ? Math.round((usage.tokens / usage.contextWindow) * 100)
+      : undefined;
+    requestFooterRender?.();
     const guidance = `Pi team orchestration is available in this repository.
 For a new feature or bug, work conversationally and ask one decision question at a time. Keep drafts local.
 When the contract is complete, call team_contract_draft with the full standard contract. Its complete Markdown must be shown to the operator.
@@ -447,6 +501,80 @@ During design, use only linear_list_*, linear_get_*, and linear_search_* tools. 
     },
   });
 
+  const deliveryController = (): { controller: DeliveryController; deliveryStore: DeliveryStore } => {
+    if (!initiative || !project) throw new Error("No active initiative");
+    const runner = new ArgvCommandRunner();
+    const deliveryStore = new DeliveryStore(store.initiativeDir(initiative));
+    const cmux = new CmuxAdapter(runner, project);
+    const controller = new DeliveryController({
+      runner,
+      git: new GitAdapter(runner),
+      github: new GitHubAdapter(runner),
+      cmux,
+      store: deliveryStore,
+      worker: runDeliveryWorker,
+      onUpdate: async (state) => {
+        delivery = state;
+        uiSnapshot.delivery = state;
+        requestFooterRender?.();
+      },
+    });
+    return { controller, deliveryStore };
+  };
+
+  pi.registerCommand("team-delivery", {
+    description: "Manage delivery: /team-delivery [start|show|resume|abort|cleanup]",
+    getArgumentCompletions: (prefix) => {
+      const values = ["start", "show", "resume", "abort", "cleanup"].filter((value) => value.startsWith(prefix));
+      return values.length ? values.map((value) => ({ value, label: value })) : null;
+    },
+    handler: async (rawArgs, ctx) => {
+      const action = rawArgs.trim().toLowerCase() || "show";
+      const { controller, deliveryStore } = deliveryController();
+      delivery = delivery ?? await deliveryStore.latest();
+      if (action === "show") {
+        ctx.ui.notify(delivery ? displayJson(delivery) : "No delivery run", "info");
+        return;
+      }
+      if (action === "start") {
+        await verifyApprovedContractFile();
+        if (delivery?.contractHash === initiative?.approved?.contentHash) throw new Error("This approval already has a delivery run; use /team-delivery resume");
+        if (delivery && !["completed", "failed", "aborted"].includes(delivery.phase)) throw new Error("A delivery run already exists");
+        const abort = new AbortController(); activeDeliveryAbort = abort;
+        void controller.run(initiative!, project!, undefined, abort.signal).then((state) => {
+          delivery = state; if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined;
+          ctx.ui.notify(`Delivery ${state.phase}${state.prUrl ? `: ${state.prUrl}` : ""}`, state.phase === "completed" ? "info" : "warning");
+        }).catch((error) => { if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined; ctx.ui.notify(`Delivery could not start: ${(error as Error).message}`, "error"); });
+        ctx.ui.notify("Delivery started; use /team-delivery show or abort", "info");
+        return;
+      }
+      if (!delivery) throw new Error("No delivery run");
+      if (action === "resume") {
+        const abort = new AbortController(); activeDeliveryAbort = abort;
+        void controller.run(initiative!, project!, delivery, abort.signal).then((state) => {
+          delivery = state; if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined;
+          ctx.ui.notify(`Delivery ${state.phase}`, state.phase === "completed" ? "info" : "warning");
+        }).catch((error) => { if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined; ctx.ui.notify(`Delivery could not resume: ${(error as Error).message}`, "error"); });
+        ctx.ui.notify("Delivery resume started", "info");
+        return;
+      }
+      if (action === "abort") {
+        activeDeliveryAbort?.abort();
+        await controller.abort(delivery);
+        ctx.ui.notify("Delivery aborted; worktree and logs retained", "warning");
+        return;
+      }
+      if (action === "cleanup") {
+        if (!["failed", "aborted"].includes(delivery.phase)) throw new Error("Cleanup is allowed only for failed or aborted runs; successful worktrees are retained");
+        if (!ctx.hasUI || !await ctx.ui.confirm("Confirm delivery cleanup", "Delete private run state and logs? Git branches and worktrees are not removed.")) return;
+        await deliveryStore.cleanup(delivery.runId); delivery = undefined; uiSnapshot.delivery = undefined;
+        ctx.ui.notify("Private delivery run state cleaned; Git and cmux resources were not removed", "info");
+        return;
+      }
+      ctx.ui.notify("Usage: /team-delivery [start|show|resume|abort|cleanup]", "warning");
+    },
+  });
+
   pi.registerCommand("team-overview", {
     description: "Open the read-only Pi team overview",
     handler: async (_args, ctx) => {
@@ -475,6 +603,7 @@ During design, use only linear_list_*, linear_get_*, and linear_search_* tools. 
             initiatives,
             usage,
             contextPercent,
+            delivery,
             theme,
             () => done(),
             () => tui.requestRender(),

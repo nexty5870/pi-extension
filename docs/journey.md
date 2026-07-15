@@ -83,6 +83,26 @@ The generic MCP client remains useful for non-Linear servers and retains static-
 - Credentials should stay with the operator-controlled companion and never flow through contract state.
 - Independent per-event files remain easy to inspect and avoid concurrent append contention.
 
+## Milestone 3 — cmux-native delivery workers
+
+The next vertical slice turns a fresh approved, hash-matching contract into an explicit delivery run. A durable controller—not terminal scraping—owns the workflow. Git, GitHub, cmux, subprocess, and storage adapters are injected so failure and reconciliation paths can be tested without live services.
+
+The cmux design uses the caller workspace as an immutable anchor: one right-side Team pane, two focus-disabled role surfaces, and coalesced status/progress/flash updates. Private logs are display material only; worker control remains process/state based.
+
+Independent review is bound to the exact diff hash. Approved argv checks and `git diff --check` run after review; any check mutation consumes another review pass. Publication is gated by a sensitive-content scan and public repository visibility, then ends at a PR/CI operator action without merge or deployment.
+
+The footer and overview now share delivery state. Context thresholds are visual only, preserving Pi's compaction behavior and the default model/Git/status information.
+
+Automated dogfood uses fake service adapters and temporary local/bare Git repositories. The remaining manual dogfood—an actual cmux run and test PR against a disposable public fixture—is deliberately retained as a classic TODO because no disposable public fixture is configured in this repository.
+
+### General lessons
+
+- Persist intent and immutable identities before side effects; reconcile by IDs and SHAs rather than guessing.
+- Terminal surfaces are useful observability endpoints but poor control protocols.
+- Final approval belongs to a content hash, not merely to a process exit code.
+- Publication safety is a separate gate after tests and review.
+- A custom footer must explicitly preserve unrelated statuses, model, and branch information.
+
 ## Next experiments
 
 Potential future work:

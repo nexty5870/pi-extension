@@ -37,4 +37,10 @@ Approval is stored locally first. If no Linear destination is configured, report
 - Never delete, archive, mutate unrelated projects/documents, switch workspaces, or use unknown `linear_*` tools.
 - Never expose credentials or route Linear through generic MCP.
 
-V1 stops after optional contract persistence. Delivery workers, worktrees, commits, PRs, review loops, merge, and deployment remain a later phase.
+## Delivery
+
+A freshly approved contract with complete delivery metadata may start only through explicit `/team-delivery start`. Confirm that the current contract hash still matches approval, optional Linear persistence is complete, and the Git/GitHub/cmux preflight is clean. Delivery uses one isolated implementer, one independent reviewer, at most three review passes, approved argv checks, publication scanning, and durable recovery.
+
+Use `/team-delivery show` for inspection, `resume` for idempotent reconciliation, `abort` to stop and retain diagnostics, and explicitly confirmed `cleanup` only for failed/aborted private state. Never infer permission to start delivery from contract approval alone.
+
+Delivery may create a worktree/branch, commit, push normally, and open or reconcile the approved GitHub PR. It must stop before merge or deployment. Never force-push, delete branches/remotes, remove a successful worktree automatically, mutate Linear from a worker, or change/focus the operator's cmux workspace.
