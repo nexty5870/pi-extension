@@ -35,6 +35,9 @@ Approval is stored locally first. If no Linear destination is configured, report
 
 - Install with `pi install npm:@alasano/pi-linear`; do not implement authentication.
 - `/linear-auth`, `/linear-settings`, and workspace selection are operator-controlled.
+- Before every write, inspect the pi-linear tool schema and resolve human team/project/status names with the relevant `linear_list_*` or `linear_get_*` tool. Use canonical values in `teamId`, `teamKey`, `projectId`, `stateId`, and similar ID fields; never put a display name into an ID field.
+- A read-proven name/key-to-ID substitution preserves the approved destination scope. Do not revise the contract, increment its version, or ask for reapproval solely to normalize identifiers.
+- After every write, call `linear_get_issue` and report success only when the requested destination/content/status is confirmed.
 - After approval, only `linear_create_issue` for the planned destination and update/comment operations scoped to the active issue are permitted.
 - Never delete, archive, mutate unrelated projects/documents, switch workspaces, or use unknown `linear_*` tools.
 - Never expose credentials or route Linear through generic MCP.
