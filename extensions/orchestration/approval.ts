@@ -12,9 +12,11 @@ export function normalizeApprovalText(text: string): string {
 }
 
 const EXPLICIT_APPROVALS = [
-  /^approve(?:d)?(?: the)? contract and (?:start )?implement(?:ation|ing)?$/,
-  /^approve(?:d)? implement(?:ation|ing)?$/,
-  /^go ahead and implement(?: it|ation)?$/,
+  /^(?:yes )?approve(?:d)?(?: the)?(?: contract)?(?: and)?(?: start)?(?: implementation| implementing| implement| get it done| do it| ship it| mark it done)?$/,
+  /^(?:yes )?(?:accept|accepted)(?: the)? contract(?: and)?(?: get it done| do it| implement(?: it|ation)?)?$/,
+  /^(?:yes )?(?:go ahead(?: and)?|please )?(?:get it done|do it|implement(?: it|ation)?|ship it|make it happen|mark it done)$/,
+  /^(?:yes )?(?:go ahead|proceed|continue)(?: with (?:it|implementation|the contract))?$/,
+  /^(?:yes )?(?:let s|lets) (?:do it|get it done|ship it)$/,
 ];
 
 const AMBIGUOUS_ACKNOWLEDGEMENTS = new Set([
@@ -25,12 +27,21 @@ const AMBIGUOUS_ACKNOWLEDGEMENTS = new Set([
   "sounds good",
   "fine",
   "sure",
-  "proceed",
-  "go ahead",
 ]);
+
+export function isCompletionDirective(text: string): boolean {
+  const normalized = normalizeApprovalText(text);
+  const negated = /\b(?:do not|don t|never|not)\b.*\b(?:mark|complete|close)\b/.test(normalized);
+  return !negated && !/^(?:should|shall) (?:we|i)\b/.test(normalized) && /\b(?:mark (?:it )?done|complete (?:it|the issue)|close (?:it|the issue))\b/.test(normalized);
+}
 
 export function classifyApprovalIntent(text: string): ApprovalIntent {
   const normalized = normalizeApprovalText(text);
+  if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|implement|proceed|continue|ship|mark)\b/.test(normalized)) return "none";
+  if (/^(?:should|shall) (?:we|i)\b/.test(normalized)) return "none";
+  if (/\b(?:approve|approved|accept|accepted)\b/.test(normalized)) return "explicit";
+  if (/\b(?:get it done|do it|implement it|start implementation|ship it|make it happen|mark (?:it )?done)\b/.test(normalized)) return "explicit";
+  if (/\bgo ahead(?: and (?:implement(?: it|ation)?|get it done|do it|ship it))?\b/.test(normalized)) return "explicit";
   if (EXPLICIT_APPROVALS.some((pattern) => pattern.test(normalized))) return "explicit";
   if (AMBIGUOUS_ACKNOWLEDGEMENTS.has(normalized)) return "ambiguous";
   return "none";

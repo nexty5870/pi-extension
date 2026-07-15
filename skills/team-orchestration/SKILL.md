@@ -19,13 +19,15 @@ Treat the current Git repository and caller cmux workspace as the project. Keep 
 
 Call `team_contract_draft` only with a complete Feature or Bug contract. Show its full Markdown. `/team-contract open` is an optional explicit Zed review action; never open or focus Zed automatically.
 
-After a review-ready contract, call `team_contract_approve` only when the operator clearly approves both the contract and implementation. Matching is case- and punctuation-tolerant. Examples include:
+After a review-ready contract, call `team_contract_approve` whenever the operator clearly accepts or directs action. Do not require them to mention both the contract and implementation, and never make them repeat clear intent. Examples include:
 
-- “Approve contract and start implementation”
-- “approved, implement”
-- “go ahead and implement”
+- “Approve, get it done”
+- “do it”
+- “ship it”
+- “go ahead”
+- “mark it done”
 
-“ok”, “looks good”, and similar acknowledgements are ambiguous. Ask for confirmation instead of treating them as approval or demanding a magic phrase.
+Only a genuinely non-actionable acknowledgement such as a bare “ok” or “looks good” is ambiguous. Ask once in that case. A direct request to mark an existing active issue done is an operator workflow instruction, not a reason to invent a retrospective implementation contract. Resolve the team's completed status, update only the active issue's `stateId`, read the issue back, and report success only after the completed status is confirmed.
 
 Approval is stored locally first. If no Linear destination is configured, report exactly: **GitHub/docs-only; no Linear mutation.** If a destination is configured, use the exact pi-linear persistence plan returned by `team_contract_approve`.
 

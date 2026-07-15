@@ -4,12 +4,13 @@ import { contractFromInput } from "../extensions/orchestration/contracts.ts";
 import {
   authorizeLinearTool,
   classifyLinearTool,
+  collectCompletedStatusIds,
   isLinearMcpRoute,
 } from "../extensions/orchestration/linear-policy.ts";
 import type { InitiativeState } from "../extensions/orchestration/types.ts";
 
 const now = "2026-01-01T00:00:00.000Z";
-function initiative(linear: { team?: string; issueId?: string }, status: InitiativeState["status"] = "approved"): InitiativeState {
+function initiative(linear: { team?: string; issueId?: string; issueIdentifier?: string }, status: InitiativeState["status"] = "approved"): InitiativeState {
   return {
     schemaVersion: 1,
     initiativeId: "initiative-1",
@@ -45,6 +46,28 @@ test("allows only reads during contract design", () => {
   const design = initiative({ issueId: "issue-1" }, "review");
   assert.equal(authorizeLinearTool("linear_list_issues", {}, { initiative: design }).allowed, true);
   assert.equal(authorizeLinearTool("linear_update_issue", { issue: "issue-1" }, { initiative: design }).allowed, false);
+});
+
+test("collects only completed workflow statuses from pi-linear results", () => {
+  assert.deepEqual([...collectCompletedStatusIds({ data: { statuses: [
+    { id: "started", name: "In Progress", type: "started" },
+    { id: "done", name: "Done", type: "completed" },
+  ] } })], ["done"]);
+  assert.deepEqual([...collectCompletedStatusIds([{ type: "text", text: JSON.stringify({ statuses: [{ id: "closed", type: "completed" }] }) }])], ["closed"]);
+});
+
+test("direct operator completion allows only a resolved completed state on the active issue", () => {
+  const review = initiative({ issueId: "issue-1" }, "review");
+  const workflow = { initiative: review, allowWorkflowUpdate: true, completedStatusIds: new Set(["done"]) };
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "issue-1", stateId: "done" }, workflow).allowed, true);
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "issue-1", stateId: "started" }, workflow).allowed, false);
+  const aliases = initiative({ issueId: "uuid-1", issueIdentifier: "DEMO-1" }, "review");
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "DEMO-1", stateId: "done" }, { ...workflow, initiative: aliases }).allowed, true);
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "issue-2", stateId: "done" }, workflow).allowed, false);
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "issue-1", title: "rewrite", stateId: "done" }, workflow).allowed, false);
+  assert.equal(authorizeLinearTool("linear_create_comment", { issueId: "issue-1", body: "done" }, workflow).allowed, false);
+  const approved = initiative({ issueId: "issue-1" });
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "issue-1", description: "approved contract" }, { ...workflow, initiative: approved }).allowed, true);
 });
 
 test("scopes approved pi-linear writes and always blocks destructive operations", () => {

@@ -22,6 +22,21 @@ export function hasLinearDestination(contract: FeatureOrBugContract): boolean {
   return Boolean(contract.linear.issueId || contract.linear.issueIdentifier || contract.linear.team);
 }
 
+export function collectCompletedStatusIds(value: unknown, result = new Set<string>()): Set<string> {
+  if (typeof value === "string" && /^[\[{]/.test(value.trim())) {
+    try { return collectCompletedStatusIds(JSON.parse(value), result); } catch { return result; }
+  }
+  if (!value || typeof value !== "object") return result;
+  if (Array.isArray(value)) { for (const item of value) collectCompletedStatusIds(item, result); return result; }
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" ? record.id : undefined;
+  const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+  const name = typeof record.name === "string" ? record.name.toLowerCase() : "";
+  if (id && (type === "completed" || /^(?:done|completed|complete)$/.test(name))) result.add(id);
+  for (const item of Object.values(record)) collectCompletedStatusIds(item, result);
+  return result;
+}
+
 function stringAt(args: Record<string, unknown>, keys: string[]): string | undefined {
   for (const key of keys) {
     const value = args[key];
@@ -42,6 +57,9 @@ function hasOnlyKeys(args: Record<string, unknown>, allowed: string[]): boolean 
 export interface LinearPolicyContext {
   initiative?: InitiativeState;
   allowCreateIssue?: boolean;
+  /** One-turn capability created by a direct operator request such as “mark it done”. */
+  allowWorkflowUpdate?: boolean;
+  completedStatusIds?: ReadonlySet<string>;
 }
 
 export function authorizeLinearTool(
@@ -62,11 +80,17 @@ export function authorizeLinearTool(
   }
 
   const initiative = context.initiative;
-  if (!initiative?.contract || initiative.status !== "approved" || !hasLinearDestination(initiative.contract)) {
-    return { allowed: false, reason: `${toolName} is unavailable without an approved Linear-bound contract` };
+  if (!initiative?.contract || !hasLinearDestination(initiative.contract)) {
+    return { allowed: false, reason: `${toolName} has no active Linear-bound contract` };
+  }
+  if (initiative.status !== "approved" && !context.allowWorkflowUpdate) {
+    return { allowed: false, reason: `${toolName} requires contract approval or a direct operator workflow instruction` };
   }
 
   if (toolName.toLowerCase() === "linear_create_issue") {
+    if (initiative.status !== "approved") {
+      return { allowed: false, reason: "Issue creation still requires an approved contract" };
+    }
     if (!context.allowCreateIssue || initiative.contract.linear.issueId || initiative.contract.linear.issueIdentifier) {
       return { allowed: false, reason: "Issue creation is allowed only for pending approved-contract persistence" };
     }
@@ -87,15 +111,35 @@ export function authorizeLinearTool(
     return { allowed: true };
   }
 
-  const activeIssue = initiative.contract.linear.issueId ?? initiative.contract.linear.issueIdentifier ?? initiative.approved?.issueId;
-  if (!activeIssue) return { allowed: false, reason: `${toolName} has no active issue binding` };
+  if (initiative.status !== "approved" && toolName.toLowerCase() !== "linear_update_issue") {
+    return { allowed: false, reason: "Direct workflow instructions authorize only the active issue status update" };
+  }
+
+  const activeIssues = new Set([
+    initiative.contract.linear.issueId,
+    initiative.contract.linear.issueIdentifier,
+    initiative.approved?.issueId,
+    initiative.approved?.issueIdentifier,
+  ].filter((value): value is string => Boolean(value)));
+  if (activeIssues.size === 0) return { allowed: false, reason: `${toolName} has no active issue binding` };
   const target = issueReference(args);
-  if (target !== activeIssue) {
-    return { allowed: false, reason: `${toolName} must target the active issue ${activeIssue}` };
+  if (!target || !activeIssues.has(target)) {
+    return { allowed: false, reason: `${toolName} must target the active issue (${[...activeIssues].join(" / ")})` };
   }
   const name = toolName.toLowerCase();
+  const workflowStateId = name === "linear_update_issue" && context.allowWorkflowUpdate && typeof args.stateId === "string"
+    ? args.stateId
+    : undefined;
+  if (name === "linear_update_issue" && context.allowWorkflowUpdate && initiative.status !== "approved" && !workflowStateId) {
+    return { allowed: false, reason: "Direct workflow instructions authorize only a completed stateId" };
+  }
+  if (workflowStateId && !context.completedStatusIds?.has(workflowStateId)) {
+    return { allowed: false, reason: "Marking an issue done requires a stateId resolved from the team's completed statuses in this turn" };
+  }
   const allowedKeys = name === "linear_update_issue"
-    ? ["issue", "title", "description"]
+    ? workflowStateId
+      ? ["issue", "stateId", "completedAt", "canceledAt"]
+      : ["issue", "title", "description"]
     : name === "linear_create_comment"
       ? ["issueId", "body"]
       : ["id", "issueId", "body", "quotedText"];
