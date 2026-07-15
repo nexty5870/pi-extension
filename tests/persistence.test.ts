@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { contractFromInput } from "../extensions/orchestration/contracts.ts";
-import { approveContractLocally, planLinearPersistence } from "../extensions/orchestration/persistence.ts";
+import { approveContractLocally, normalizeApprovedIssueCreateArguments, planLinearPersistence } from "../extensions/orchestration/persistence.ts";
 
 function contract(linear?: { team?: string; issueId?: string }) {
   return contractFromInput({
@@ -24,6 +24,22 @@ test("approves local-only contracts without planning a Linear contact", () => {
   assert.equal(approved.source, "local");
   assert.equal(approved.linearPersistence, "not-configured");
   assert.equal(planLinearPersistence(local, approvedAt), undefined);
+});
+
+test("normalizes proposed pi-linear creation to the exact approved managed payload", () => {
+  const value = contract({ team: "DEMO" });
+  const normalized = normalizeApprovedIssueCreateArguments(value, approvedAt, {
+    input: { teamId: "team-uuid", projectId: "project-uuid", title: "wrong", description: "missing markers", priority: 1 },
+    title: "also wrong",
+    labelIds: ["unapproved"],
+  });
+  assert.deepEqual(Object.keys(normalized).sort(), ["description", "projectId", "teamId", "title"]);
+  assert.equal(normalized.title, value.title);
+  assert.equal(normalized.teamId, "team-uuid");
+  assert.equal(normalized.projectId, "project-uuid");
+  assert.match(String(normalized.description), /<!-- pi-contract:start -->/);
+  assert.match(String(normalized.description), /<!-- pi-contract:end -->/);
+  assert.doesNotMatch(String(normalized.description), /missing markers|also wrong/);
 });
 
 test("keeps optional Linear persistence when a destination is configured", () => {

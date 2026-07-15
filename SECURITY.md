@@ -16,7 +16,7 @@ Linear authentication is owned by [`@alasano/pi-linear`](https://github.com/alas
 
 The optional `~/.pi/team-orchestration/mcp.json` is only for non-Linear MCP servers. Keep private static headers there with `0600` permissions and never commit the file. Existing files are not exposed or migrated automatically.
 
-All `linear_*` tool calls are intercepted regardless of which third-party extension registered them. Reads are limited by prefix; approved writes are active-issue scoped; destructive, workspace-switching, unrelated resource mutations, and unknown tools are blocked. A direct operator instruction to mark the active issue done grants only a one-turn `stateId` update using a completed status discovered for that team; it does not authorize unrelated fields or issues.
+All `linear_*` tool calls are intercepted regardless of which third-party extension registered them. Reads are limited by prefix; approved writes are active-issue scoped; destructive, workspace-switching, unrelated resource mutations, and unknown tools are blocked. Approved issue creation is normalized in the tool hook: unapproved proposed fields are removed, canonical destination IDs are retained, and the approved title/managed description are injected by orchestration. A direct operator instruction to mark the active issue done grants only a one-turn `stateId` update using a completed status discovered for that team; it does not authorize unrelated fields or issues.
 
 ## Delivery workers and publication
 

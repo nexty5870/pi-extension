@@ -27,7 +27,7 @@ import {
   restoreInitiative,
 } from "./session-state.ts";
 import { OrchestrationStore } from "./store.ts";
-import { approveContractLocally, planLinearPersistence } from "./persistence.ts";
+import { approveContractLocally, normalizeApprovedIssueCreateArguments, planLinearPersistence } from "./persistence.ts";
 import { ArgvCommandRunner } from "./delivery/command.ts";
 import { GitAdapter } from "./delivery/git.ts";
 import { GitHubAdapter } from "./delivery/github.ts";
@@ -247,7 +247,13 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
 
   pi.on("tool_call", (event) => {
     if (event.toolName.startsWith("linear_")) {
-      const authorization = authorizeLinearTool(event.toolName, event.input as Record<string, unknown>, {
+      const input = event.input as Record<string, unknown>;
+      if (event.toolName === "linear_create_issue" && linearCreateArmed && initiative?.contract && initiative.approved) {
+        const normalized = normalizeApprovedIssueCreateArguments(initiative.contract, initiative.approved.approvedAt, input);
+        for (const key of Object.keys(input)) delete input[key];
+        Object.assign(input, normalized);
+      }
+      const authorization = authorizeLinearTool(event.toolName, input, {
         initiative,
         allowCreateIssue: linearCreateArmed,
         allowWorkflowUpdate: operatorWorkflowUpdateArmed,
@@ -344,7 +350,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
 For a new feature or bug, work conversationally and ask one decision question at a time. Keep drafts local.
 When the contract is complete, call team_contract_draft with the full standard contract. Its complete Markdown must be shown to the operator.
 Call team_contract_approve after any clear acceptance or action directive, including “approve, get it done”, “do it”, “ship it”, or “mark it done”. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
-When invoking pi-linear tools, treat human names and canonical IDs as different representations of the same approved destination, not as scope changes. Before a write that needs teamId, teamKey, projectId, stateId, or another canonical reference, call the relevant linear_list_* or linear_get_* tool and use the exact schema field and canonical value returned. Never place a project name in projectId. A read-proven name-to-ID substitution does not change contract scope, must not increment the contract version, and must not trigger reapproval. After every Linear write, read the issue back and report success only after verifying the requested result.
+When invoking pi-linear tools, treat human names and canonical IDs as different representations of the same approved destination, not as scope changes. Before a write that needs teamId, teamKey, projectId, stateId, or another canonical reference, call the relevant linear_list_* or linear_get_* tool and use the exact schema field and canonical value returned. Never place a project name in projectId. A read-proven name-to-ID substitution does not change contract scope, must not increment the contract version, and must not trigger reapproval. For approved issue creation, provide only the canonical destination identifiers; orchestration injects the exact approved title and managed description, so never reconstruct hidden markers or ask for reapproval because of formatting. After every Linear write, read the issue back and report success only after verifying the requested result.
 ${operatorWorkflowUpdateArmed
       ? "The operator directly instructed you to complete the active Linear issue. This is an administrative workflow update, not implementation work: do not create a retrospective contract or request another approval. Resolve the team's completed status with read tools, call linear_update_issue for the exact active issue with stateId, then call linear_get_issue and report success only if the returned status is completed. Do not make any other mutation."
       : "During design, use only linear_list_*, linear_get_*, and linear_search_* tools. Do not implement, modify project files, create branches, or mutate Linear during design."}`;
@@ -430,7 +436,7 @@ ${operatorWorkflowUpdateArmed
       await store.writeEvent(initiative, "contract.approved", approved as unknown as Record<string, unknown>);
       ctx.ui.setStatus("team-orchestration", `approved: ${initiative.contract.title}`);
       const destinationMessage = persistence
-        ? `Linear persistence is pending through @alasano/pi-linear. Preserve the planned title/body and destination scope, but first resolve any human team/project names with linear_list_* or linear_get_* and use canonical teamId/teamKey/projectId fields required by the tool schema. Read-proven identifier substitution is operational normalization, not a contract change, and requires no reapproval. Then call ${persistence.toolName} and verify the issue by reading it back.`
+        ? `Linear persistence is pending through @alasano/pi-linear. Resolve human team/project names with linear_list_* or linear_get_* and provide canonical teamId/teamKey/projectId fields. Orchestration will inject the exact approved title and managed description into ${persistence.toolName}; do not reconstruct hidden markers, revise the contract, or request reapproval for formatting or read-proven identifier normalization. Verify the issue by reading it back after the write.`
         : "GitHub/docs-only; no Linear mutation.";
       return textResult(
         `${markdown}\n${destinationMessage}\n\nV1 stops before code mutation.`,

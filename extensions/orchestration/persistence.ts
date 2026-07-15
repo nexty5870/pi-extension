@@ -19,6 +19,37 @@ export function approveContractLocally(
   };
 }
 
+function proposedString(proposed: Record<string, unknown>, key: string): string | undefined {
+  const direct = proposed[key];
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const input = proposed.input;
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    const nested = (input as Record<string, unknown>)[key];
+    if (typeof nested === "string" && nested.trim()) return nested.trim();
+  }
+  return undefined;
+}
+
+/**
+ * The extension, not the model, owns approved persistence formatting. Only canonical
+ * destination identifiers survive from proposed pi-linear arguments.
+ */
+export function normalizeApprovedIssueCreateArguments(
+  contract: FeatureOrBugContract,
+  approvedAt: string,
+  proposed: Record<string, unknown>,
+): Record<string, unknown> {
+  const teamId = proposedString(proposed, "teamId");
+  const teamKey = proposedString(proposed, "teamKey");
+  const projectId = proposedString(proposed, "projectId");
+  return {
+    ...(teamId ? { teamId } : teamKey ? { teamKey } : {}),
+    ...(projectId ? { projectId } : {}),
+    title: contract.title,
+    description: renderLinearContract(contract, approvedAt, contractHash(contract)),
+  };
+}
+
 export interface LinearPersistencePlan {
   toolName: "linear_create_issue" | "linear_update_issue";
   arguments: Record<string, unknown>;
