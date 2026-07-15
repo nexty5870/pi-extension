@@ -62,6 +62,27 @@ Spawning a detached replacement after the original Pi process exits can cause th
 - Refuse self-update behavior in non-interactive modes
 - Use Pi's official update command instead of duplicating package-manager logic
 
+## Milestone 2 — V1 team orchestration foundation
+
+The second extension keeps Pi's native sessions and cmux workspaces as the shell while adding local Feature/Bug contracts, explicit review, deterministic approval state, read-only scouts, and an overview.
+
+Bootstrap review exposed three useful corrections:
+
+- Linear should be optional; local-only approval must neither require a destination nor initialize an integration.
+- Approval intent should normalize presentation differences while keeping vague acknowledgements behind a confirmation question.
+- A companion extension can own authentication and API calls while orchestration owns a global `tool_call` policy boundary. `@alasano/pi-linear` now fills that role; its `/linear-auth` and `/linear-settings` controls remain operator-owned.
+
+The generic MCP client remains useful for non-Linear servers and retains static-header support. The hosted Linear MCP API-key example was retired rather than migrating any private configuration.
+
+### General lessons
+
+- Native `/resume` is the right conversation continuity layer; orchestration state should complement it rather than replace it.
+- Approval must be deterministic, but deterministic does not mean exact-string matching.
+- Optional integrations need explicit `not-configured`, `pending`, and `persisted` states.
+- Pi's global tool-call hook is the right place to prevent third-party tools from bypassing active-issue scoping.
+- Credentials should stay with the operator-controlled companion and never flow through contract state.
+- Independent per-event files remain easy to inspect and avoid concurrent append contention.
+
 ## Next experiments
 
 Potential future work:

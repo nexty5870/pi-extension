@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "documentation": {
+      "transport": "http",
+      "url": "https://mcp.example.invalid/mcp",
+      "headers": {
+        "Authorization": "Bearer REPLACE_IN_PRIVATE_COPY_ONLY"
+      },
+      "policy": {
+        "read": ["list_*", "get_*", "search_*"],
+        "write": ["update_note"],
+        "destructive": ["delete_*", "archive_*"]
+      }
+    }
+  }
+}
