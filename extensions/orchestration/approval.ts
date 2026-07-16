@@ -58,6 +58,18 @@ export function isLinearPlanPublishDirective(text: string): boolean {
   return !negated && !deliberative && (publish || create);
 }
 
+export function extractLinearIssueIdentifiers(text: string): string[] {
+  return [...new Set(text.toUpperCase().match(/\b[A-Z][A-Z0-9]+-\d+\b/g) ?? [])];
+}
+
+export function isLinearIssueAdminDirective(text: string): boolean {
+  const normalized = normalizeApprovalText(text);
+  const negated = /\b(?:do not|don t|never|not)\b.*\b(?:apply|update|change|set|add|remove|tag|label|prioritize|link|block|depend|assign)\b/.test(normalized);
+  const deliberative = /^(?:should|shall) (?:we|i)\b/.test(normalized);
+  const action = /\b(?:apply|update|change|set|add|remove|tag|label|prioritize|link|block|depend|assign)\w*\b/.test(normalized) || /^(?:yes|agreed|do it|go ahead|apply it)\b/.test(normalized);
+  return !negated && !deliberative && action;
+}
+
 export function isLinearPlanPublishCancelDirective(text: string): boolean {
   const normalized = normalizeApprovalText(text);
   return /\b(?:cancel|stop|abort|forget)\b.{0,80}\b(?:linear|publish|publication|sync|plan)\b/.test(normalized) ||

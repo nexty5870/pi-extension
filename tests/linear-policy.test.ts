@@ -40,6 +40,7 @@ test("classifies pi-linear reads, scoped writes, destructive, and unknown tools"
   assert.equal(classifyLinearTool("linear_update_issue"), "write");
   assert.equal(classifyLinearTool("linear_delete_issue"), "destructive");
   assert.equal(classifyLinearTool("linear_save_project"), "write");
+  assert.equal(classifyLinearTool("linear_create_issue_relation"), "write");
   assert.equal(classifyLinearTool("linear_switch_workspace"), "operator");
 });
 
@@ -92,6 +93,16 @@ test("prevents generic MCP and third-party Linear write bypass", () => {
   assert.equal(isLinearMcpRoute("linear", "update_issue"), true);
   assert.equal(isLinearMcpRoute("other", "linear_update_issue"), true);
   assert.equal(authorizeLinearTool("linear_save_project", {}, { initiative: initiative({ issueId: "issue-1" }) }).allowed, false);
+});
+
+test("allows explicit issue administration only for named issues", () => {
+  const aliases = collectLinearResourceAliases({ issues: [{ id: "uuid-1", identifier: "DEMO-41" }, { id: "uuid-2", identifier: "DEMO-42" }] });
+  const context = { allowIssueAdmin: true, adminIssueRefs: new Set(["DEMO-41", "DEMO-42"]), resourceAliases: aliases };
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "uuid-1", priority: 1, addedLabelIds: ["label-1"] }, context).allowed, true);
+  assert.equal(authorizeLinearTool("linear_update_issue", { issue: "OTHER-1", priority: 1 }, context).allowed, false);
+  assert.equal(authorizeLinearTool("linear_create_issue_relation", { issueId: "DEMO-41", relatedIssueId: "uuid-2", type: "blocks" }, context).allowed, true);
+  assert.equal(authorizeLinearTool("linear_create_issue_relation", { issueId: "DEMO-41", relatedIssueId: "OTHER-1", type: "blocks" }, context).allowed, false);
+  assert.equal(authorizeLinearTool("linear_create_issue_relation", { issueId: "DEMO-41", relatedIssueId: "DEMO-42", type: "delete" }, context).allowed, false);
 });
 
 test("allows create-only project publication with read-proven teams", () => {
