@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { FeatureOrBugContract, InitiativeState, ProjectContext } from "../types.ts";
 import { contractHash, renderContract } from "../contracts.ts";
@@ -109,10 +109,24 @@ export class DeliveryController {
 
   private async ensureDependencies(state: DeliveryState, signal?: AbortSignal): Promise<void> {
     if (state.dependencySetupComplete || !state.metadata.checks.some((argv) => argv[0] === "pnpm")) return;
-    try { await access(join(state.worktreePath!, "pnpm-lock.yaml")); } catch { return; }
-    const result = await this.deps.runner.run("pnpm", ["install", "--frozen-lockfile"], { cwd: state.worktreePath!, timeoutMs: 10 * 60_000, signal });
-    await this.deps.store.writeLog(state.runId, "dependency-setup", `${result.stdout}\n${result.stderr}`);
-    if (result.exitCode !== 0) throw new Error("Dependency setup failed: pnpm install --frozen-lockfile");
+    const lockPath = join(state.worktreePath!, "pnpm-lock.yaml");
+    try { await access(lockPath); } catch { return; }
+    const packageJson = await readFile(join(state.worktreePath!, "package.json"), "utf8").then((text) => JSON.parse(text) as { packageManager?: string }).catch(() => undefined);
+    const configured = packageJson?.packageManager?.match(/^pnpm@([^+\s]+)/)?.[1];
+    const lockfile = await readFile(lockPath, "utf8");
+    const lockVersion = lockfile.match(/^lockfileVersion:\s*['"]?([^'"\s]+)['"]?/m)?.[1];
+    const pnpmVersion = configured ?? (lockVersion?.startsWith("9") ? "9.15.9" : lockVersion?.startsWith("6") ? "8.15.9" : undefined);
+    if (!pnpmVersion) throw new Error(`Dependency setup cannot select a compatible pnpm version for lockfile ${lockVersion ?? "unknown"}`);
+    const modules = await readFile(join(state.worktreePath!, "node_modules", ".modules.yaml"), "utf8").catch(() => "");
+    const installedPnpm = modules.match(/^packageManager:\s*pnpm@([^\s]+)$/m)?.[1];
+    const args = [`pnpm@${pnpmVersion}`, "install", "--frozen-lockfile", ...(installedPnpm && installedPnpm !== pnpmVersion ? ["--force"] : [])];
+    const result = await this.deps.runner.run("corepack", args, { cwd: state.worktreePath!, timeoutMs: 10 * 60_000, signal });
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    await this.deps.store.writeLog(state.runId, "dependency-setup", output);
+    if (result.exitCode !== 0) {
+      const tail = output.split("\n").slice(-8).join(" ").slice(-800);
+      throw new Error(`Dependency setup failed: corepack ${args.join(" ")}${tail ? ` — ${tail}` : ""}`);
+    }
     state.dependencySetupComplete = true;
     await this.save(state);
   }

@@ -55,7 +55,7 @@ test("controller prepares pnpm dependencies in a new isolated worktree", async (
   item.approved!.contentHash = contractHash(item.contract!);
   await writeFile(join(h.root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
   const state = await h.controller.run(item, project(h.root)); assert.equal(state.phase, "completed");
-  assert.ok(h.calls.includes("pnpm install --frozen-lockfile"));
+  assert.ok(h.calls.includes("corepack pnpm@9.15.9 install --frozen-lockfile"));
 });
 test("controller rejects contract drift and reconciles publication without duplicate commit", async () => {
   const h = await harness(); const item = initiative(h.root); const state = h.controller.create(item); item.contract!.title = "drift";
