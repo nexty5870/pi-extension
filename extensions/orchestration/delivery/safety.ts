@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 const SENSITIVE = /(^|\/)(\.env(?:\..*)?|\.npmrc|\.pypirc|credentials(?:\.json)?|auth\.json|id_rsa|id_ed25519|.*\.(?:pem|p12|key))$/i;
 const SECRET = /(gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer\s+[A-Za-z0-9._~+/=-]{24,})/;
-const PRIVATE_PATH = /(?:^|["'\s])\/(?:Users|home)\/[A-Za-z0-9._-]+\//;
+function containsLocalAbsolutePath(text: string): boolean {
+  const home = homedir().replaceAll("\\", "/").replace(/\/$/, "");
+  return Boolean(home && text.replaceAll("\\", "/").includes(`${home}/`));
+}
 
 export function diffHash(diff: string): string { return `sha256:${createHash("sha256").update(diff).digest("hex")}`; }
 export function isSensitivePath(path: string): boolean { return SENSITIVE.test(path.replaceAll("\\", "/")); }
@@ -38,7 +42,7 @@ export async function scanPublicFiles(root: string, paths: string[], options: { 
     if (content.byteLength > (options.maxBytes ?? 2_000_000)) { findings.push({ path, reason: "file exceeds publication size limit" }); continue; }
     const text = content.toString("utf8");
     if (SECRET.test(text)) findings.push({ path, reason: "possible credential" });
-    if (PRIVATE_PATH.test(text)) findings.push({ path, reason: "private absolute path" });
+    if (containsLocalAbsolutePath(text)) findings.push({ path, reason: "private absolute path" });
   }
   return findings;
 }

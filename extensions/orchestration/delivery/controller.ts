@@ -55,10 +55,11 @@ export class DeliveryController {
   private async execute(state: DeliveryState, contract: FeatureOrBugContract, project: ProjectContext, signal?: AbortSignal): Promise<void> {
     if (contractHash(contract) !== state.contractHash) throw new Error("Contract drift detected before delivery");
     await this.deps.github.assertPublishable(state.projectRoot);
-    const hadTopology = Boolean(state.cmux?.implementerSurfaceId && state.cmux?.reviewerSurfaceId);
+    const previousTopology = state.cmux;
     state.cmux = await this.deps.cmux.ensureTopology(state.cmux);
+    const reusedTopology = Boolean(previousTopology?.implementerSurfaceId === state.cmux.implementerSurfaceId && previousTopology?.reviewerSurfaceId === state.cmux.reviewerSurfaceId);
     await this.save(state, "preflight");
-    if (!hadTopology) {
+    if (!reusedTopology) {
       const implementerLog = await this.deps.store.writeLog(state.runId, "implementer-live", "");
       const reviewerLog = await this.deps.store.writeLog(state.runId, "reviewer-live", "");
       await this.deps.cmux.attachLogs(state.cmux, implementerLog, reviewerLog);
@@ -127,9 +128,16 @@ export class DeliveryController {
       }
       if (repair) await this.repairFailedCheck(state, repair.argv, repair.output, signal);
     } while (repair);
-    const final = await this.deps.git.diff(state.worktreePath, state.baseSha!);
+    let final = await this.deps.git.diff(state.worktreePath, state.baseSha!);
     if (final.hash !== state.reviewedDiffHash) throw new Error("Final diff was not covered by reviewer approval");
-    const findings = await scanPublicFiles(state.worktreePath, final.paths); if (findings.length) throw new Error(`Publication safety scan failed: ${findings.map((item) => `${item.path}: ${item.reason}`).join(", ")}`);
+    let findings = await scanPublicFiles(state.worktreePath, final.paths);
+    if (findings.length && findings.every((item) => item.reason === "private absolute path")) {
+      await this.repairPublicationPaths(state, findings, signal);
+      final = await this.deps.git.diff(state.worktreePath, state.baseSha!);
+      findings = await scanPublicFiles(state.worktreePath, final.paths);
+    }
+    if (findings.length) throw new Error(`Publication safety scan failed: ${findings.map((item) => `${item.path}: ${item.reason}`).join(", ")}`);
+    if (final.hash !== state.reviewedDiffHash) throw new Error("Publication repair diff was not covered by reviewer approval");
 
     await this.save(state, "committing"); state.commitSha = await this.deps.git.commit(state.worktreePath, state.metadata.commitMessage);
     await this.publish(state);
@@ -159,6 +167,16 @@ export class DeliveryController {
       await this.runWorker(state, "implementer", `Address only these repair-review findings:\n${parsed.findings.map((item) => `- ${item}`).join("\n")}`, signal);
     }
     throw new Error(`Check repair was not reviewer-approved: ${argv.join(" ")}`);
+  }
+
+  private async repairPublicationPaths(state: DeliveryState, findings: Array<{ path: string; reason: string }>, signal?: AbortSignal): Promise<void> {
+    await this.runWorker(state, "implementer", `Remove local-machine absolute paths from these changed files without altering documented production paths such as /home/<service>. Use portable repository-relative wording.\n${findings.map((item) => `- ${item.path}: ${item.reason}`).join("\n")}`, signal);
+    const current = await this.deps.git.diff(state.worktreePath!, state.baseSha!);
+    const reviewed = await this.runWorker(state, "reviewer", `Review publication-safety repair hash ${current.hash}. Return strict JSON only.\n\n${current.text}`, signal);
+    const parsed = parseReviewerResult(reviewed.text, current.hash);
+    if (parsed.verdict !== "approved") throw new Error("Publication path repair was not reviewer-approved");
+    state.reviewedDiffHash = current.hash;
+    await this.save(state);
   }
 
   private async ensureDependencies(state: DeliveryState, signal?: AbortSignal): Promise<void> {

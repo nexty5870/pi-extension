@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { assertContainedPath, assertWorkerTool, diffHash, scanPublicFiles } from "../extensions/orchestration/delivery/safety.ts";
@@ -23,8 +23,9 @@ test("worker guard denies traversal, symlink escape, sensitive paths, shell publ
 test("public scanner catches credentials, private paths, and limits", async () => {
   const root = await mkdtemp(join(tmpdir(), "delivery-scan-"));
   await writeFile(join(root, "secret.txt"), ["ghp", "abcdefghijklmnopqrstuvwxyz123456"].join("_"));
-  await writeFile(join(root, "path.txt"), `see /${"Users"}/example/private/file`);
-  const findings = await scanPublicFiles(root, ["secret.txt", "path.txt"]); assert.equal(findings.length, 2);
+  await writeFile(join(root, "path.txt"), `see ${homedir()}/private/file`);
+  await writeFile(join(root, "production.txt"), "service file: /home/jambonz/pbx-edge/.env");
+  const findings = await scanPublicFiles(root, ["secret.txt", "path.txt", "production.txt"]); assert.equal(findings.length, 2);
   assert.equal((await scanPublicFiles(root, ["a", "b"], { maxFiles: 1 }))[0]?.reason, "file count exceeds publication limit");
 });
 test("review parser requires strict JSON and exact diff hash", () => {
