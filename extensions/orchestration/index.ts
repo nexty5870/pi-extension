@@ -4,7 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isImplementationStartDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, restoreLinearPlanPublishIntent, type ApprovalIntent } from "./approval.ts";
+import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isImplementationStartDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, isNewCmuxWindowDirective, restoreLinearPlanPublishIntent, type ApprovalIntent } from "./approval.ts";
 import {
   contractFromInput,
   contractHash,
@@ -31,7 +31,7 @@ import { approveContractLocally, isApprovedContractCreatePending, normalizeAppro
 import { ArgvCommandRunner } from "./delivery/command.ts";
 import { GitAdapter } from "./delivery/git.ts";
 import { GitHubAdapter } from "./delivery/github.ts";
-import { CmuxAdapter } from "./delivery/cmux.ts";
+import { CmuxAdapter, isSingleCmuxCommand } from "./delivery/cmux.ts";
 import { DeliveryController } from "./delivery/controller.ts";
 import { DeliveryStore } from "./delivery/store.ts";
 import { runDeliveryWorker } from "./delivery/worker.ts";
@@ -93,6 +93,10 @@ function messageContentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.filter((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "text").map((part) => String((part as { text?: unknown }).text ?? "")).join("\n");
   return "";
+}
+
+function restoredCmuxPlacement(messages: string[]): "caller" | "new-window" {
+  return messages.some(isNewCmuxWindowDirective) ? "new-window" : "caller";
 }
 
 function sessionUserMessages(ctx: ExtensionContext): string[] {
@@ -181,6 +185,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   let approvalArmed = false;
   let approvalIntent: ApprovalIntent = "none";
   let implementationIntentArmed = false;
+  let operatorCmuxPlacement: "caller" | "new-window" = "caller";
   let operatorIssueCreateArmed = false;
   let operatorIssueAdminArmed = false;
   let operatorIssueAdminRefs = new Set<string>();
@@ -270,7 +275,9 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     project = await resolveProjectContext(ctx.cwd);
     await store.registerProject(project);
     initiative = restoreInitiative(ctx);
-    operatorPlanPublishArmed = restoreLinearPlanPublishIntent(sessionUserMessages(ctx));
+    const userMessages = sessionUserMessages(ctx);
+    operatorPlanPublishArmed = restoreLinearPlanPublishIntent(userMessages);
+    operatorCmuxPlacement = restoredCmuxPlacement(userMessages);
     operatorIssueAdminRefs = restoredIssueAdminRefs(ctx);
     operatorIssueAdminArmed = operatorIssueAdminRefs.size > 0;
     approvalArmed = initiative?.status === "review" && restoreContractApprovalIntent(ctx);
@@ -307,7 +314,9 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
 
   pi.on("session_tree", async (_event, ctx) => {
     initiative = restoreInitiative(ctx);
-    operatorPlanPublishArmed = restoreLinearPlanPublishIntent(sessionUserMessages(ctx));
+    const userMessages = sessionUserMessages(ctx);
+    operatorPlanPublishArmed = restoreLinearPlanPublishIntent(userMessages);
+    operatorCmuxPlacement = restoredCmuxPlacement(userMessages);
     operatorIssueAdminRefs = restoredIssueAdminRefs(ctx);
     operatorIssueAdminArmed = operatorIssueAdminRefs.size > 0;
     delivery = initiative ? await new DeliveryStore(store.initiativeDir(initiative)).latest() : undefined;
@@ -339,6 +348,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     if (initiative?.status !== "review") approvalArmed = false;
     else if (approvalIntent === "explicit") approvalArmed = true;
     else if (approvalIntent === "ambiguous") approvalArmed = false;
+    if (isNewCmuxWindowDirective(event.text)) operatorCmuxPlacement = "new-window";
     const startsImplementation = isImplementationStartDirective(event.text);
     if (startsImplementation) implementationIntentArmed = true;
     const startsPlanPublication = isLinearPlanPublishDirective(event.text);
@@ -410,10 +420,11 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
       if (event.toolName === "linear_save_project") linearProjectInFlight = true;
     }
     if (!initiative || initiative.status === "closed") return;
+    if (event.toolName === "bash" && isSingleCmuxCommand(String((event.input as Record<string, unknown>).command ?? ""))) return;
     if (["edit", "write", "bash"].includes(event.toolName)) {
       return {
         block: true,
-        reason: `Project mutation is disabled in the V1 CTO session while initiative ${initiative.initiativeId} is ${initiative.status}`,
+        reason: `Direct project mutation is disabled in the orchestration session while initiative ${initiative.initiativeId} is ${initiative.status}; isolated delivery workers own code changes, while single cmux CLI commands remain available for topology`,
       };
     }
   });
@@ -470,18 +481,6 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     });
   });
 
-  pi.on("user_bash", () => {
-    if (!initiative || initiative.status === "closed") return;
-    return {
-      result: {
-        output: `Shell execution is disabled in the V1 CTO session while initiative ${initiative.initiativeId} is ${initiative.status}.`,
-        exitCode: 1,
-        cancelled: false,
-        truncated: false,
-      },
-    };
-  });
-
   pi.on("message_end", async (event) => {
     if (!project || event.message.role !== "assistant") return;
     const message = event.message;
@@ -522,7 +521,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     const guidance = `Pi team orchestration is available in this repository.
 Route by operator intent. A request to load, show, inspect, summarize, or discuss a Linear issue is read-only: use pi-linear reads and respond directly, with no contract or approval ceremony. For planning, work conversationally and ask only decisions that are actually missing.
 A clear request to implement, start, build, fix, or work on an issue is execution authorization for isolated worktree/PR delivery. Create the full standard contract as an internal work order with team_contract_draft; orchestration auto-approves it from that implementation directive. Do not dump the contract Markdown, pause for review, or ask for a second confirmation unless the operator explicitly requested contract review. Complete required approved Linear persistence, then call team_delivery_start yourself. Merge, deployment, production mutation, and destructive actions remain blocked.
-For an explicitly review-first contract without implementation authorization, call team_contract_approve after any clear acceptance or action directive, including “confirm, let's proceed”, “approve, get it done”, “do it”, “ship it”, or “mark it done”. team_contract_approve is a tool, not a /team-contract subcommand: /team-contract approve does not exist and must never be suggested. When that directive also asks to start/proceed with implementation, complete required approved Linear persistence and call team_delivery_start yourself; do not require the operator to run /team-delivery start. team_delivery_start also retries a failed run for the same approval. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
+For an explicitly review-first contract without implementation authorization, call team_contract_approve after any clear acceptance or action directive, including “confirm, let's proceed”, “approve, get it done”, “do it”, “ship it”, or “mark it done”. team_contract_approve is a tool, not a /team-contract subcommand: /team-contract approve does not exist and must never be suggested. When that directive also asks to start/proceed with implementation, complete required approved Linear persistence and call team_delivery_start yourself; do not require the operator to run /team-delivery start. If the operator explicitly asks for a new cmux window, call team_delivery_start with placement new-window; otherwise use caller. The tool creates and records topology itself, so do not manually create duplicate worker panes. team_delivery_start also retries a failed run for the same approval. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
 When invoking pi-linear tools, treat human names and canonical IDs as different representations of the same approved destination, not as scope changes. Before a write that needs teamId, teamKey, projectId, stateId, or another canonical reference, call the relevant linear_list_* or linear_get_* tool and use the exact schema field and canonical value returned. Never place a project name in projectId. A read-proven name-to-ID substitution does not change contract scope, must not increment the contract version, and must not trigger reapproval. For approved issue creation, provide only the canonical destination identifiers; orchestration injects the exact approved title and managed description, so never reconstruct hidden markers or ask for reapproval because of formatting. After every Linear write, read the issue back and report success only after verifying the requested result.
 ${operatorIssueAdminArmed
       ? `The operator explicitly authorized Linear administration for these issues: ${[...operatorIssueAdminRefs].join(", ")}. This is not implementation work and requires no contract or approval. Use pi-linear reads to resolve issue UUIDs, labels, statuses, users, and projects. Apply only the requested priority/label/assignment/scheduling fields with linear_update_issue and only requested blocks/duplicate/related/similar links with linear_create_issue_relation. Every target and both ends of every relation must be in the authorized issue set. Read the changed issues and relations back, summarize results, and stop. Do not ask the operator to make these changes manually.`
@@ -702,11 +701,11 @@ ${operatorIssueAdminArmed
     },
   });
 
-  const deliveryController = (): { controller: DeliveryController; deliveryStore: DeliveryStore } => {
+  const deliveryController = (placement: "caller" | "new-window" = "caller"): { controller: DeliveryController; deliveryStore: DeliveryStore } => {
     if (!initiative || !project) throw new Error("No active initiative");
     const runner = new ArgvCommandRunner();
     const deliveryStore = new DeliveryStore(store.initiativeDir(initiative));
-    const cmux = new CmuxAdapter(runner, project);
+    const cmux = new CmuxAdapter(runner, project, placement);
     const controller = new DeliveryController({
       runner,
       git: new GitAdapter(runner),
@@ -731,9 +730,9 @@ ${operatorIssueAdminArmed
     return `Delivery ${state.phase}${validation}${destination}${failure}`;
   };
 
-  const launchDelivery = async (ctx: ExtensionContext, resume?: DeliveryState): Promise<string> => {
+  const launchDelivery = async (ctx: ExtensionContext, resume?: DeliveryState, placement: "caller" | "new-window" = "caller"): Promise<string> => {
     await verifyApprovedContractFile();
-    const { controller, deliveryStore } = deliveryController();
+    const { controller, deliveryStore } = deliveryController(placement);
     delivery = delivery ?? await deliveryStore.latest();
     const sameApproval = delivery?.contractHash === initiative?.approved?.contentHash;
     let existing = resume;
@@ -760,9 +759,11 @@ ${operatorIssueAdminArmed
     name: "team_delivery_start",
     label: "Start Team Delivery",
     description: "Start or retry the approved isolated implementation workflow after a clear operator implementation directive",
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _update, ctx) {
-      return textResult(await launchDelivery(ctx));
+    parameters: Type.Object({
+      placement: Type.Optional(StringEnum(["caller", "new-window"] as const, { description: "Place worker surfaces in the caller workspace or a dedicated new cmux window" })),
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      return textResult(await launchDelivery(ctx, undefined, params.placement ?? operatorCmuxPlacement));
     },
   });
 

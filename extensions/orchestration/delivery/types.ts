@@ -61,7 +61,7 @@ export interface DeliveryState {
   workers: Partial<Record<WorkerRole, WorkerSnapshot>>;
   checks: CheckResult[];
   actions: OperatorAction[];
-  cmux?: { paneId?: string; implementerSurfaceId?: string; reviewerSurfaceId?: string };
+  cmux?: { windowId?: string; workspaceId?: string; placement?: "caller" | "new-window"; paneId?: string; implementerSurfaceId?: string; reviewerSurfaceId?: string };
   failure?: string;
   startedAt: string;
   updatedAt: string;

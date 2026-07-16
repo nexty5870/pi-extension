@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isImplementationStartDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, normalizeApprovalText, restoreLinearPlanPublishIntent } from "../extensions/orchestration/approval.ts";
+import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isImplementationStartDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, isNewCmuxWindowDirective, normalizeApprovalText, restoreLinearPlanPublishIntent } from "../extensions/orchestration/approval.ts";
 
 for (const phrase of [
   "Approve contract and start implementation",
@@ -23,6 +23,12 @@ for (const phrase of [
 
 test("normalizes case, surrounding whitespace, and punctuation", () => {
   assert.equal(normalizeApprovalText("  Approved, IMPLEMENT! "), "approved implement");
+});
+
+test("recognizes explicit dedicated cmux window placement", () => {
+  assert.equal(isNewCmuxWindowDirective("retry the implementation in a new cmux window"), true);
+  assert.equal(isNewCmuxWindowDirective("use a dedicated cmux window for workers"), true);
+  assert.equal(isNewCmuxWindowDirective("retry in the current workspace"), false);
 });
 
 test("recognizes natural implementation start directives", () => {

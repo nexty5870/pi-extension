@@ -70,6 +70,11 @@ export function isLinearIssueAdminDirective(text: string): boolean {
   return !negated && !deliberative && action;
 }
 
+export function isNewCmuxWindowDirective(text: string): boolean {
+  const normalized = normalizeApprovalText(text);
+  return /\b(?:new|separate|dedicated)\b.{0,80}\bcmux\b.{0,40}\bwindow\b/.test(normalized) || /\bcmux\b.{0,40}\b(?:new|separate|dedicated)\b.{0,40}\bwindow\b/.test(normalized);
+}
+
 export function isImplementationStartDirective(text: string): boolean {
   const normalized = normalizeApprovalText(text);
   const negated = /\b(?:do not|don t|never|not)\b.*\b(?:start|begin|launch|implement|proceed|continue)\b/.test(normalized);
