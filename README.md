@@ -16,6 +16,7 @@ One persistent **Lead** Pi session coordinates real, interactive Pi workers in t
 - Research workers are visible and read-only.
 - Review workers share an implementation worktree and receive the issue, acceptance criteria, exact diff, and validation evidence.
 - Multiple independent workers can run concurrently in tabs inside one non-focus-stealing helper pane.
+- Completed, blocked, review, and PR transitions durably wake the Lead so it can take the next step without another operator prompt.
 - Durable states distinguish `running`, `blocked`, `pr-ready-ci-pending`, `pr-ready-ci-green`, `completed`, `failed`, and `merged`.
 - Pending PRs are polled through `gh pr view`; green requires an approved review of the unchanged diff and a matching PR head.
 

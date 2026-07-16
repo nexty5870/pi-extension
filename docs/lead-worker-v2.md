@@ -72,7 +72,9 @@ State lives at:
 
 Directories are mode `0700`; state, assignments, and review packets are mode `0600`. Writes are atomic and cross-process task updates use short lock files.
 
-The Lead dashboard polls local task state. Pending PRs are observed with `gh pr view --json ...`; pending checks do not become failures merely because `gh pr checks` would exit non-zero. A task becomes `pr-ready-ci-green` only when CI is green, the worktree is clean, the PR head matches the local worker HEAD, and an independent approved review is bound to the unchanged diff hash. The extension never merges.
+The Lead dashboard polls local task state. Worker transitions are acknowledged durably; `completed`, `blocked`, review, pending-PR, green-PR, failure, stop, and merge observations inject a worker event into the persistent Lead session and trigger its next turn. If the Lead was closed, the unobserved event is delivered after the next startup or `/reload` rather than being lost.
+
+Pending PRs are observed with `gh pr view --json ...`; pending checks do not become failures merely because `gh pr checks` would exit non-zero. A task becomes `pr-ready-ci-green` only when CI is green, the worktree is clean, the PR head matches the local worker HEAD, and an independent approved review is bound to the unchanged diff hash. The extension never merges.
 
 ## Authorization and safety
 

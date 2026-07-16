@@ -168,6 +168,8 @@ export class LeadCoordinator {
       sessionId: id,
       checks: [],
       messages: [],
+      leadObservedStatus: "starting",
+      leadObservedAt: createdAt,
       createdAt,
       updatedAt: createdAt,
     };
@@ -246,7 +248,13 @@ export class LeadCoordinator {
         surface: placement.surface,
       }));
       await cmux.launch(placement.surface.surfaceId, launchScriptPath, runtime.signal);
-      current = await this.store.updateTask(task.projectId, id, (value) => ({ ...value, status: "running", failure: undefined }));
+      current = await this.store.updateTask(task.projectId, id, (value) => ({
+        ...value,
+        status: "running",
+        leadObservedStatus: "running",
+        leadObservedAt: timestamp(),
+        failure: undefined,
+      }));
       await cmux.setTaskStatus(id, "running", runtime.signal);
       return current;
     } catch (error) {
@@ -258,6 +266,13 @@ export class LeadCoordinator {
 
   async list(projectId: string): Promise<TaskRecord[]> {
     return this.store.listTasks(projectId);
+  }
+
+  async markLeadObserved(projectId: string, taskId: string, expectedStatus?: TaskStatus): Promise<TaskRecord> {
+    return this.store.updateTask(projectId, taskId, (current) => {
+      if (expectedStatus && current.status !== expectedStatus) return current;
+      return { ...current, leadObservedStatus: current.status, leadObservedAt: timestamp() };
+    });
   }
 
   async message(projectId: string, taskId: string, message: string, signal?: AbortSignal): Promise<TaskRecord> {

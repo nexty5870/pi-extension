@@ -114,6 +114,7 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     acceptanceCriteria: ["Every imported record has an owner", "Parent records are synchronized", "Malformed input has regression coverage"],
   }, runtime);
   assert.equal(implementation.status, "running");
+  assert.equal(implementation.leadObservedStatus, "running");
   assert.equal(implementation.surface?.workspaceId, "workspace:2");
   assert.ok(implementation.worktreePath.startsWith(store.root));
   const launch = await readFile(implementation.launchScriptPath!, "utf8");
@@ -144,11 +145,16 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     checks: [{ name: "npm test", status: "passed", details: "42 tests" }],
   });
   assert.equal(reported.pullRequest?.url, "https://github.com/example/repo/pull/7");
+  assert.equal(reported.leadObservedStatus, "running");
   const selfReportedGreen = await coordinator.report(implementation.projectId, implementation.id, {
     status: "pr-ready-ci-green",
     prUrl: "https://github.com/example/repo/pull/7",
   });
   assert.equal(selfReportedGreen.status, "pr-ready-ci-pending");
+  await coordinator.markLeadObserved(implementation.projectId, implementation.id, "running");
+  assert.equal((await store.requireTask(implementation.projectId, implementation.id)).leadObservedStatus, "running");
+  await coordinator.markLeadObserved(implementation.projectId, implementation.id, "pr-ready-ci-pending");
+  assert.equal((await store.requireTask(implementation.projectId, implementation.id)).leadObservedStatus, "pr-ready-ci-pending");
   harness.ci = "green";
   const unreviewedGreen = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
   assert.equal(unreviewedGreen.status, "blocked");

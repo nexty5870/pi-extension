@@ -4,11 +4,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { LeadCoordinator, summarizeTasks, workerLabel } from "./coordinator.ts";
+import { isActionableWorkerState, pendingLeadEvents, workerEventMessage } from "./events.ts";
 import type { CommandExecutor } from "./git.ts";
 import { LEAD_SYSTEM_PROMPT } from "./prompt.ts";
 import { classifyBashRisk, isDestructiveLinearTool, isLinearMutationTool, riskDescription, sensitiveCommandReason, sensitivePathReason } from "./safety.ts";
 import { defaultLeadStateDir, LeadStore } from "./store.ts";
-import { TASK_STATUSES, type TaskRecord, type TaskStatus, type WorkerRole } from "./types.ts";
+import { TASK_STATUSES, type TaskRecord, type WorkerRole } from "./types.ts";
 
 declare const __filename: string;
 
@@ -50,6 +51,16 @@ function taskLine(task: TaskRecord): string {
   return `${icon} ${task.id.slice(0, 8)} ${task.status} · ${task.brief.title}`;
 }
 
+function shouldResetLegacyUi(ctx: ExtensionContext): boolean {
+  let legacy = false;
+  for (const entry of ctx.sessionManager.getEntries()) {
+    if (entry.type === "custom" && entry.customType === "lead-v2:legacy-ui-reset") return false;
+    if (entry.type === "custom" && entry.customType.startsWith("team-orchestration")) legacy = true;
+    if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName.startsWith("team_")) legacy = true;
+  }
+  return legacy;
+}
+
 function workerRolePrompt(taskId: string, role: string): string {
   return `You are the visible ${role} worker for Lead task ${taskId}. Your assignment is in the appended system prompt. Use normal Pi tools within that scope. Keep the Lead informed with lead_worker_report. Never merge, deploy, force-push, expose credentials, or mutate unrelated external resources without separate direct operator authorization.`;
 }
@@ -80,40 +91,61 @@ export default function leadExtension(pi: ExtensionAPI) {
   const extensionPath = typeof __filename === "string" ? __filename : undefined;
   const coordinator = new LeadCoordinator(store, execute, undefined, extensionPath);
   let dashboardTimer: ReturnType<typeof setInterval> | undefined;
+  let leadWakeTimer: ReturnType<typeof setTimeout> | undefined;
   let ciTimer: ReturnType<typeof setInterval> | undefined;
   let dashboardProjectId: string | undefined;
   let dashboardContext: ExtensionContext | undefined;
-  let previousStatuses = new Map<string, TaskStatus>();
+  let dashboardUpdateRunning = false;
   let ciRefreshRunning = false;
   let inboxTimer: ReturnType<typeof setInterval> | undefined;
   let inboxContext: ExtensionContext | undefined;
   let inboxRunning = false;
 
-  const updateDashboard = async (notifyChanges = false) => {
-    if (!dashboardContext || !dashboardProjectId) return;
-    const tasks = await coordinator.list(dashboardProjectId).catch(() => []);
-    const active = tasks.filter((task) => !["completed", "failed", "stopped", "merged"].includes(task.status));
-    const running = active.filter((task) => task.status === "running" || task.status === "starting").length;
-    const blocked = active.filter((task) => task.status === "blocked").length;
-    const green = active.filter((task) => task.status === "pr-ready-ci-green").length;
-    dashboardContext.ui.setStatus(
-      STATUS_KEY,
-      `Lead · ${active.length} active${running ? ` · ${running} running` : ""}${blocked ? ` · ${blocked} blocked` : ""}${green ? ` · ${green} green` : ""}`,
-    );
-    dashboardContext.ui.setWidget(
-      WIDGET_KEY,
-      active.length > 0 ? ["Lead workers", ...active.slice(0, 6).map(taskLine)] : undefined,
-      { placement: "aboveEditor" },
-    );
-    if (notifyChanges) {
-      for (const task of tasks) {
-        const previous = previousStatuses.get(task.id);
-        if (previous && previous !== task.status && ["blocked", "failed", "pr-ready-ci-green", "merged"].includes(task.status)) {
-          dashboardContext.ui.notify(`${task.brief.title}: ${task.status}${task.blockedReason ? ` — ${task.blockedReason}` : ""}`, task.status === "blocked" || task.status === "failed" ? "warning" : "info");
+  const updateDashboard = async (emitEvents = false) => {
+    if (dashboardUpdateRunning || !dashboardContext || !dashboardProjectId) return;
+    dashboardUpdateRunning = true;
+    try {
+      const tasks = await coordinator.list(dashboardProjectId).catch(() => []);
+      const active = tasks.filter((task) => !["completed", "failed", "stopped", "merged"].includes(task.status));
+      const running = active.filter((task) => task.status === "running" || task.status === "starting").length;
+      const blocked = active.filter((task) => task.status === "blocked").length;
+      const green = active.filter((task) => task.status === "pr-ready-ci-green").length;
+      dashboardContext.ui.setStatus(
+        STATUS_KEY,
+        `Lead · ${active.length} active${running ? ` · ${running} running` : ""}${blocked ? ` · ${blocked} blocked` : ""}${green ? ` · ${green} green` : ""}`,
+      );
+      dashboardContext.ui.setWidget(
+        WIDGET_KEY,
+        active.length > 0 ? ["Lead workers", ...active.slice(0, 6).map(taskLine)] : undefined,
+        { placement: "aboveEditor" },
+      );
+
+      const unobserved = tasks.filter((task) => task.leadObservedStatus !== task.status);
+      const actionable = pendingLeadEvents(tasks);
+      for (const task of unobserved.filter((candidate) => !isActionableWorkerState(candidate.status))) {
+        await coordinator.markLeadObserved(dashboardProjectId, task.id, task.status);
+      }
+
+      if (emitEvents && actionable.length > 0) {
+        for (const task of actionable) {
+          dashboardContext.ui.notify(
+            `${task.brief.title}: ${task.status}${task.blockedReason ? ` — ${task.blockedReason}` : ""}`,
+            task.status === "blocked" || task.status === "failed" ? "warning" : "info",
+          );
+        }
+        pi.sendMessage({
+          customType: "lead:worker-event",
+          content: workerEventMessage(actionable),
+          display: true,
+          details: { taskIds: actionable.map((task) => task.id) },
+        }, { deliverAs: "followUp", triggerTurn: true });
+        for (const task of actionable) {
+          await coordinator.markLeadObserved(dashboardProjectId, task.id, task.status);
         }
       }
+    } finally {
+      dashboardUpdateRunning = false;
     }
-    previousStatuses = new Map(tasks.map((task) => [task.id, task.status]));
   };
 
   const refreshPendingPullRequests = async () => {
@@ -157,6 +189,12 @@ export default function leadExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     await store.initialize();
+    if (!isWorker && shouldResetLegacyUi(ctx)) {
+      ctx.ui.setStatus("team-orchestration", undefined);
+      ctx.ui.setStatus("team-context", undefined);
+      if (ctx.mode === "tui") ctx.ui.setFooter(undefined);
+      pi.appendEntry("lead-v2:legacy-ui-reset", { resetAt: new Date().toISOString() });
+    }
     if (isWorker && workerTaskId && workerProjectId) {
       const task = await store.readTask(workerProjectId, workerTaskId);
       if (task) {
@@ -187,6 +225,8 @@ export default function leadExtension(pi: ExtensionAPI) {
     dashboardProjectId = context.record.projectId;
     dashboardContext = ctx;
     await updateDashboard(false);
+    leadWakeTimer = setTimeout(() => void updateDashboard(true), 250);
+    leadWakeTimer.unref();
     dashboardTimer = setInterval(() => void updateDashboard(true), DASHBOARD_INTERVAL_MS);
     ciTimer = setInterval(() => void refreshPendingPullRequests(), CI_INTERVAL_MS);
     dashboardTimer.unref();
@@ -195,9 +235,11 @@ export default function leadExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     if (dashboardTimer) clearInterval(dashboardTimer);
+    if (leadWakeTimer) clearTimeout(leadWakeTimer);
     if (ciTimer) clearInterval(ciTimer);
     if (inboxTimer) clearInterval(inboxTimer);
     dashboardTimer = undefined;
+    leadWakeTimer = undefined;
     ciTimer = undefined;
     inboxTimer = undefined;
     dashboardContext = undefined;
@@ -330,6 +372,7 @@ export default function leadExtension(pi: ExtensionAPI) {
           blockedReason: params.reason,
           summary: params.summary ?? params.reason,
         }, signal);
+        await coordinator.markLeadObserved(context.record.projectId, updated.id, updated.status);
         await updateDashboard(false);
         return textResult(`${updated.id.slice(0, 8)}: ${updated.status}`, { task: updated });
       },
@@ -343,6 +386,7 @@ export default function leadExtension(pi: ExtensionAPI) {
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         const context = await coordinator.project({ cwd: ctx.cwd, signal });
         const task = await coordinator.refreshPullRequest(context.record.projectId, params.taskId, signal);
+        await coordinator.markLeadObserved(context.record.projectId, task.id, task.status);
         await updateDashboard(false);
         return textResult(`${task.id.slice(0, 8)}: ${task.status}${task.blockedReason ? ` — ${task.blockedReason}` : ""}`, { task });
       },

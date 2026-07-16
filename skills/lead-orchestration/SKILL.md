@@ -23,7 +23,7 @@ Use `lead_workers` to reconcile state, `lead_update_worker` after direct operato
 
 ## Worker handoff
 
-Workers call `lead_worker_report` at meaningful transitions:
+Workers call `lead_worker_report` at meaningful transitions. Those transitions wake the persistent Lead automatically; continue the existing operator request from the handoff instead of waiting for another prompt:
 
 - `running`
 - `blocked` with a concrete reason

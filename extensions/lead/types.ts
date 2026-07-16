@@ -95,6 +95,8 @@ export interface TaskRecord {
   review?: ReviewEvidence;
   reviewTarget?: ReviewTarget;
   messages?: WorkerMessage[];
+  leadObservedStatus?: TaskStatus;
+  leadObservedAt?: string;
   failure?: string;
   setupWarnings?: string[];
   createdAt: string;
