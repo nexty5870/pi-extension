@@ -10,6 +10,7 @@ import { diffHash } from "../extensions/orchestration/delivery/safety.ts";
 import type { CommandRunner } from "../extensions/orchestration/delivery/command.ts";
 import type { InitiativeState, ProjectContext } from "../extensions/orchestration/types.ts";
 
+const diffEmpty = { text: "", hash: diffHash(""), paths: [] as string[] };
 const diffA = { text: "diff --git a/a b/a\n+safe\n", hash: diffHash("diff --git a/a b/a\n+safe\n"), paths: [] as string[] };
 const diffB = { text: "diff --git a/a b/a\n+safer\n", hash: diffHash("diff --git a/a b/a\n+safer\n"), paths: [] as string[] };
 function initiative(root: string): InitiativeState {
@@ -18,13 +19,13 @@ function initiative(root: string): InitiativeState {
 }
 const project = (root: string): ProjectContext => ({ projectId: "p1", projectRoot: root, projectName: "fixture", cmuxWorkspaceId: "w1", cmuxSurfaceId: "s1" });
 
-async function harness(options: { verdicts?: Array<"approved" | "changes_requested">; checkExit?: number; checkExits?: number[]; mutate?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "controller-")); const calls: string[] = []; let diffCalls = 0; const verdicts = [...(options.verdicts ?? ["approved"])]; const checkExits = [...(options.checkExits ?? [])];
+async function harness(options: { verdicts?: Array<"approved" | "changes_requested">; checkExit?: number; checkExits?: number[]; mutate?: boolean; existingDiff?: boolean } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "controller-")); const calls: string[] = []; let diffCalls = 0; let implemented = options.existingDiff ?? false; const verdicts = [...(options.verdicts ?? ["approved"])]; const checkExits = [...(options.checkExits ?? [])];
   const runner: CommandRunner = { async run(command, args) { calls.push(`${command} ${args.join(" ")}`); return { stdout: "", stderr: "", exitCode: checkExits.shift() ?? options.checkExit ?? 0 }; } };
-  const git: any = { preflight: async () => ({ baseSha: "base", remote: "origin" }), createWorktree: async () => root, diff: async () => { diffCalls++; return options.mutate && diffCalls >= 4 ? diffB : diffA; }, commit: async () => { calls.push("commit"); return "commit"; }, pushedSha: async () => undefined, push: async () => calls.push("push") };
+  const git: any = { preflight: async () => ({ baseSha: "base", remote: "origin" }), createWorktree: async () => root, diff: async () => { diffCalls++; return !implemented ? diffEmpty : options.mutate && diffCalls >= 4 ? diffB : diffA; }, commit: async () => { calls.push("commit"); return "commit"; }, pushedSha: async () => undefined, push: async () => calls.push("push") };
   const github: any = { assertPublishable: async () => ({ nameWithOwner: "example/repo", visibility: "PUBLIC" }), reconcilePr: async () => { calls.push("pr"); return "https://example.invalid/pr/1"; }, observeCi: async () => "success" };
   const cmux: any = { ensureTopology: async (value: any) => value ?? { paneId: "p", implementerSurfaceId: "i", reviewerSurfaceId: "r" }, attachLogs: async () => {}, update: async () => {}, flash: async () => {} };
-  const worker = async (role: string, _cwd: string, prompt: string) => { calls.push(role); if (role === "reviewer") { const verdict = verdicts.shift() ?? "approved"; const hash = prompt.includes(diffB.hash) ? diffB.hash : diffA.hash; return { text: JSON.stringify({ verdict, diffHash: hash, findings: verdict === "approved" ? [] : ["fix it"] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 } }; } return { text: "done", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 } }; };
+  const worker = async (role: string, _cwd: string, prompt: string) => { calls.push(role); if (role === "reviewer") { const verdict = verdicts.shift() ?? "approved"; const hash = prompt.includes(diffB.hash) ? diffB.hash : diffA.hash; return { text: JSON.stringify({ verdict, diffHash: hash, findings: verdict === "approved" ? [] : ["fix it"] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 } }; } implemented = true; return { text: "done", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 } }; };
   const store = new DeliveryStore(join(root, "state")); const controller = new DeliveryController({ runner, git, github, cmux, store, worker: worker as any });
   return { root, calls, controller, store };
 }
@@ -39,15 +40,27 @@ test("controller returns findings and fails after three requested-change passes"
   assert.equal(state.phase, "failed"); assert.equal(state.reviewPass, 3); assert.match(state.failure!, /pass limit/); assert.ok(!h.calls.includes("commit"));
 });
 test("controller fails closed on checks and re-reviews check-mutated diffs", async () => {
-  const failed = await harness({ checkExit: 1 }); const failedState = await failed.controller.run(initiative(failed.root), project(failed.root)); assert.equal(failedState.phase, "failed"); assert.match(failedState.failure!, /check failed/);
+  const failed = await harness({ checkExits: [0, 1, 1, 1] }); const failedState = await failed.controller.run(initiative(failed.root), project(failed.root)); assert.equal(failedState.phase, "failed"); assert.match(failedState.failure!, /repair/);
   const changed = await harness({ mutate: true, verdicts: ["approved", "approved"] }); const changedState = await changed.controller.run(initiative(changed.root), project(changed.root)); assert.equal(changedState.phase, "completed"); assert.equal(changedState.reviewPass, 2);
 });
-test("controller resumes a reviewed diff after a check failure without rerunning workers", async () => {
-  const h = await harness({ checkExits: [1, 0] }); const item = initiative(h.root);
-  const failed = await h.controller.run(item, project(h.root)); assert.equal(failed.phase, "failed");
-  const workerCalls = h.calls.filter((call) => call === "implementer" || call === "reviewer").length;
-  const resumed = await h.controller.run(item, project(h.root), failed); assert.equal(resumed.phase, "completed");
-  assert.equal(h.calls.filter((call) => call === "implementer" || call === "reviewer").length, workerCalls);
+test("controller dispatches a repair worker for a new check regression", async () => {
+  const h = await harness({ checkExits: [0, 1, 0] }); const state = await h.controller.run(initiative(h.root), project(h.root));
+  assert.equal(state.phase, "completed"); assert.equal(state.repairPass, 1);
+  assert.equal(h.calls.filter((call) => call === "implementer").length, 2);
+  assert.equal(h.calls.filter((call) => call === "reviewer").length, 2);
+});
+test("controller migrates a reviewed legacy run without inventing baseline evidence", async () => {
+  const h = await harness({ checkExits: [1, 0], existingDiff: true }); const item = initiative(h.root); const legacy = h.controller.create(item);
+  legacy.baseSha = "base"; legacy.worktreePath = h.root; legacy.reviewedDiffHash = diffA.hash; legacy.reviewPass = 3;
+  const state = await h.controller.run(item, project(h.root), legacy); assert.equal(state.phase, "completed");
+  assert.equal(state.baselineUnavailable, true);
+  assert.ok(state.checks.some((check) => check.disposition === "blocked"));
+});
+test("controller reports a base-red check as blocked without discarding reviewed work", async () => {
+  const h = await harness({ checkExits: [1, 1, 0] }); const state = await h.controller.run(initiative(h.root), project(h.root));
+  assert.equal(state.phase, "completed");
+  assert.ok(state.checks.some((check) => check.disposition === "blocked" && check.reason?.includes("untouched base")));
+  assert.ok(state.actions.some((action) => action.severity === "warning" && action.message.includes("Validation blocked")));
 });
 test("controller prepares pnpm dependencies in a new isolated worktree", async () => {
   const h = await harness(); const item = initiative(h.root);

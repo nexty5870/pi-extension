@@ -69,6 +69,15 @@ export class DeliveryController {
     await this.ensureDependencies(state, signal);
 
     const resumedDiff = await this.deps.git.diff(state.worktreePath, state.baseSha!);
+    if (state.baselineChecks === undefined) {
+      if (resumedDiff.text) {
+        state.baselineChecks = [];
+        state.baselineUnavailable = true;
+        await this.save(state);
+      } else {
+        await this.captureBaseline(state, signal);
+      }
+    }
     let approved = Boolean(resumedDiff.text && state.reviewedDiffHash === resumedDiff.hash);
     if (!approved) {
       if (state.reviewPass >= 3) state.reviewPass = 0;
@@ -85,26 +94,71 @@ export class DeliveryController {
     }
     if (!approved) throw new Error("Reviewer pass limit exhausted with unresolved findings");
 
-    await this.save(state, "checking");
-    for (const argv of [...state.metadata.checks, ["git", "diff", "--check"]]) {
-      const before = await this.deps.git.diff(state.worktreePath, state.baseSha!); const startedAt = this.now();
-      const result = await this.deps.runner.run(argv[0], argv.slice(1), { cwd: state.worktreePath, timeoutMs: 10 * 60_000, signal });
-      const outputPath = await this.deps.store.writeLog(state.runId, `check-${state.checks.length + 1}`, `${result.stdout}\n${result.stderr}`);
-      const after = await this.deps.git.diff(state.worktreePath, state.baseSha!);
-      state.checks.push({ argv, startedAt, finishedAt: this.now(), exitCode: result.exitCode, outputPath, diffHashBefore: before.hash, diffHashAfter: after.hash }); await this.save(state);
-      if (result.exitCode !== 0) throw new Error(`Approved check failed: ${argv.join(" ")}`);
-      if (before.hash !== after.hash) {
-        if (state.reviewPass >= 3) throw new Error("Checks mutated the diff after the final available review pass");
-        state.reviewPass++; const reviewed = await this.runWorker(state, "reviewer", `Checks changed the diff. Review hash ${after.hash} and return strict JSON.\n\n${after.text}`, signal);
-        const parsed = parseReviewerResult(reviewed.text, after.hash); if (parsed.verdict !== "approved") throw new Error("Check-mutated diff was not approved"); state.reviewedDiffHash = after.hash;
+    let repair: { argv: string[]; output: string } | undefined;
+    do {
+      repair = undefined;
+      await this.save(state, "checking");
+      for (const argv of [...state.metadata.checks, ["git", "diff", "--check"]]) {
+        const before = await this.deps.git.diff(state.worktreePath, state.baseSha!); const startedAt = this.now();
+        const result = await this.deps.runner.run(argv[0], argv.slice(1), { cwd: state.worktreePath, timeoutMs: 10 * 60_000, signal });
+        const output = `${result.stdout}\n${result.stderr}`;
+        const outputPath = await this.deps.store.writeLog(state.runId, `check-${state.checks.length + 1}`, output);
+        const after = await this.deps.git.diff(state.worktreePath, state.baseSha!);
+        const baseline = argv[0] === "git" ? { exitCode: 0 } : state.baselineChecks?.find((item) => JSON.stringify(item.argv) === JSON.stringify(argv));
+        const reason = result.exitCode === 0
+          ? undefined
+          : baseline?.exitCode !== 0
+            ? "check already failed on the untouched base"
+            : state.baselineUnavailable
+              ? "legacy run has no base-check evidence; failure retained for PR review"
+              : undefined;
+        const disposition = result.exitCode === 0 ? "passed" : reason ? "blocked" : "failed";
+        state.checks.push({ argv, startedAt, finishedAt: this.now(), exitCode: result.exitCode, outputPath, diffHashBefore: before.hash, diffHashAfter: after.hash, disposition, reason });
+        if (reason) this.action(state, `Validation blocked (${argv.join(" ")}): ${reason}`, "warning");
+        await this.save(state);
+        if (result.exitCode !== 0 && !reason) { repair = { argv, output }; break; }
+        if (before.hash !== after.hash) {
+          state.reviewPass++;
+          const reviewed = await this.runWorker(state, "reviewer", `Checks changed the diff. Review hash ${after.hash} and return strict JSON.\n\n${after.text}`, signal);
+          const parsed = parseReviewerResult(reviewed.text, after.hash);
+          if (parsed.verdict !== "approved") throw new Error("Check-mutated diff was not approved");
+          state.reviewedDiffHash = after.hash;
+        }
       }
-    }
+      if (repair) await this.repairFailedCheck(state, repair.argv, repair.output, signal);
+    } while (repair);
     const final = await this.deps.git.diff(state.worktreePath, state.baseSha!);
     if (final.hash !== state.reviewedDiffHash) throw new Error("Final diff was not covered by reviewer approval");
     const findings = await scanPublicFiles(state.worktreePath, final.paths); if (findings.length) throw new Error(`Publication safety scan failed: ${findings.map((item) => `${item.path}: ${item.reason}`).join(", ")}`);
 
     await this.save(state, "committing"); state.commitSha = await this.deps.git.commit(state.worktreePath, state.metadata.commitMessage);
     await this.publish(state);
+  }
+
+  private async captureBaseline(state: DeliveryState, signal?: AbortSignal): Promise<void> {
+    state.baselineChecks = [];
+    for (const argv of state.metadata.checks) {
+      const result = await this.deps.runner.run(argv[0], argv.slice(1), { cwd: state.worktreePath!, timeoutMs: 10 * 60_000, signal });
+      const outputPath = await this.deps.store.writeLog(state.runId, `baseline-${state.baselineChecks.length + 1}`, `${result.stdout}\n${result.stderr}`);
+      state.baselineChecks.push({ argv, exitCode: result.exitCode, outputPath });
+      await this.save(state);
+    }
+  }
+
+  private async repairFailedCheck(state: DeliveryState, argv: string[], output: string, signal?: AbortSignal): Promise<void> {
+    state.repairPass = (state.repairPass ?? 0) + 1;
+    if (state.repairPass > 2) throw new Error(`Check repair limit exhausted: ${argv.join(" ")}`);
+    await this.runWorker(state, "implementer", `Repair the regression from this failed check. Change only files needed for the approved work.\n\nCommand: ${argv.join(" ")}\n\nOutput:\n${output.slice(-20_000)}`, signal);
+    for (let review = 0; review < 2; review++) {
+      const current = await this.deps.git.diff(state.worktreePath!, state.baseSha!);
+      if (!current.text) throw new Error("Check repair removed the entire implementation diff");
+      const result = await this.runWorker(state, "reviewer", `Review repaired diff hash ${current.hash}. Return strict JSON only.\n\n${current.text}`, signal);
+      const parsed = parseReviewerResult(result.text, current.hash);
+      if (parsed.verdict === "approved") { state.reviewedDiffHash = current.hash; await this.save(state); return; }
+      if (review === 1) break;
+      await this.runWorker(state, "implementer", `Address only these repair-review findings:\n${parsed.findings.map((item) => `- ${item}`).join("\n")}`, signal);
+    }
+    throw new Error(`Check repair was not reviewer-approved: ${argv.join(" ")}`);
   }
 
   private async ensureDependencies(state: DeliveryState, signal?: AbortSignal): Promise<void> {
@@ -144,9 +198,10 @@ export class DeliveryController {
 
   private async runWorker(state: DeliveryState, role: WorkerRole, prompt: string, signal?: AbortSignal): Promise<WorkerResult> {
     const startedAt = this.now();
-    await this.deps.store.writeLog(state.runId, `${role}-prompt-${state.reviewPass + 1}`, prompt);
+    const ordinal = state.reviewPass + (state.repairPass ?? 0) + 1;
+    await this.deps.store.writeLog(state.runId, `${role}-prompt-${ordinal}`, prompt);
     state.workers[role] = { role, phase: "running", task: prompt.split("\n")[0], startedAt }; await this.save(state, role === "implementer" ? "implementing" : "reviewing");
-    try { const result = await this.deps.worker(role, state.worktreePath!, prompt, { signal }); state.workers[role] = { ...state.workers[role]!, phase: "passed", finishedAt: this.now(), usage: { input: result.usage.input, output: result.usage.output, cost: result.usage.cost } }; await this.deps.store.writeLog(state.runId, `${role}-${state.reviewPass + 1}`, result.text); await this.deps.store.writeLog(state.runId, `${role}-live`, result.text); await this.save(state); return result; }
+    try { const result = await this.deps.worker(role, state.worktreePath!, prompt, { signal }); state.workers[role] = { ...state.workers[role]!, phase: "passed", finishedAt: this.now(), usage: { input: result.usage.input, output: result.usage.output, cost: result.usage.cost } }; await this.deps.store.writeLog(state.runId, `${role}-${ordinal}`, result.text); await this.deps.store.writeLog(state.runId, `${role}-live`, result.text); await this.save(state); return result; }
     catch (error) { state.workers[role] = { ...state.workers[role]!, phase: "failed", finishedAt: this.now(), failure: (error as Error).message }; await this.save(state); throw error; }
   }
 

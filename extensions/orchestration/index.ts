@@ -726,7 +726,9 @@ ${operatorIssueAdminArmed
   const deliveryOutcome = (state: DeliveryState): string => {
     const destination = state.prUrl ? `: ${state.prUrl}` : "";
     const failure = state.failure ? ` — ${state.failure}` : "";
-    return `Delivery ${state.phase}${destination}${failure}`;
+    const blocked = state.actions.filter((action) => action.message.startsWith("Validation blocked")).length;
+    const validation = blocked ? ` with ${blocked} baseline/environment validation warning${blocked === 1 ? "" : "s"}` : "";
+    return `Delivery ${state.phase}${validation}${destination}${failure}`;
   };
 
   const launchDelivery = async (ctx: ExtensionContext, resume?: DeliveryState): Promise<string> => {

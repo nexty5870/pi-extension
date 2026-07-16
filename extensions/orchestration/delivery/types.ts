@@ -24,6 +24,14 @@ export interface CheckResult {
   outputPath: string;
   diffHashBefore: string;
   diffHashAfter: string;
+  disposition?: "passed" | "blocked" | "failed";
+  reason?: string;
+}
+
+export interface BaselineCheckResult {
+  argv: string[];
+  exitCode: number;
+  outputPath: string;
 }
 
 export interface OperatorAction { id: string; severity: "info" | "warning" | "critical"; message: string; createdAt: string }
@@ -45,8 +53,11 @@ export interface DeliveryState {
   prUrl?: string;
   ciState?: "pending" | "success" | "failure" | "cancelled" | "timed-out" | "none";
   reviewPass: number;
+  repairPass?: number;
   reviewedDiffHash?: string;
   dependencySetupComplete?: boolean;
+  baselineChecks?: BaselineCheckResult[];
+  baselineUnavailable?: boolean;
   workers: Partial<Record<WorkerRole, WorkerSnapshot>>;
   checks: CheckResult[];
   actions: OperatorAction[];
