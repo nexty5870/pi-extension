@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { access } from "node:fs/promises";
+import { join } from "node:path";
 import type { FeatureOrBugContract, InitiativeState, ProjectContext } from "../types.ts";
 import { contractHash, renderContract } from "../contracts.ts";
 import type { CommandRunner } from "./command.ts";
@@ -39,6 +41,8 @@ export class DeliveryController {
   async run(initiative: InitiativeState, project: ProjectContext, existing?: DeliveryState, signal?: AbortSignal): Promise<DeliveryState> {
     const state = existing ?? this.create(initiative); const release = await this.deps.store.acquire(state.runId);
     try {
+      state.failure = undefined;
+      state.actions = [];
       await this.execute(state, initiative.contract!, project, signal);
     } catch (error) {
       state.failure = (error as Error).message;
@@ -62,10 +66,15 @@ export class DeliveryController {
     if (!state.baseSha) { const preflight = await this.deps.git.preflight(state.projectRoot, state.metadata); state.baseSha = preflight.baseSha; await this.save(state, "worktree"); }
     if (!state.worktreePath) { state.worktreePath = await this.deps.git.createWorktree(state.projectRoot, this.deps.store.statePath(state.runId).replace(/\/state\.json$/, ""), state.branchName, state.baseSha!); await this.save(state); }
     if (state.commitSha) { await this.publish(state); return; }
+    await this.ensureDependencies(state, signal);
 
-    await this.runWorker(state, "implementer", `Implement this approved contract exactly.\n\n${renderContract(contract)}`, signal);
-    let approved = false;
-    while (state.reviewPass < 3) {
+    const resumedDiff = await this.deps.git.diff(state.worktreePath, state.baseSha!);
+    let approved = Boolean(resumedDiff.text && state.reviewedDiffHash === resumedDiff.hash);
+    if (!approved) {
+      if (state.reviewPass >= 3) state.reviewPass = 0;
+      await this.runWorker(state, "implementer", `Implement this approved contract exactly.\n\n${renderContract(contract)}`, signal);
+    }
+    while (!approved && state.reviewPass < 3) {
       const current = await this.deps.git.diff(state.worktreePath, state.baseSha!); if (!current.text) throw new Error("Implementer produced no diff");
       state.reviewPass++; const result = await this.runWorker(state, "reviewer", `Review this diff with hash ${current.hash}. Return strict JSON only.\n\n${current.text}`, signal);
       const review = parseReviewerResult(result.text, current.hash);
@@ -96,6 +105,16 @@ export class DeliveryController {
 
     await this.save(state, "committing"); state.commitSha = await this.deps.git.commit(state.worktreePath, state.metadata.commitMessage);
     await this.publish(state);
+  }
+
+  private async ensureDependencies(state: DeliveryState, signal?: AbortSignal): Promise<void> {
+    if (state.dependencySetupComplete || !state.metadata.checks.some((argv) => argv[0] === "pnpm")) return;
+    try { await access(join(state.worktreePath!, "pnpm-lock.yaml")); } catch { return; }
+    const result = await this.deps.runner.run("pnpm", ["install", "--frozen-lockfile"], { cwd: state.worktreePath!, timeoutMs: 10 * 60_000, signal });
+    await this.deps.store.writeLog(state.runId, "dependency-setup", `${result.stdout}\n${result.stderr}`);
+    if (result.exitCode !== 0) throw new Error("Dependency setup failed: pnpm install --frozen-lockfile");
+    state.dependencySetupComplete = true;
+    await this.save(state);
   }
 
   private async publish(state: DeliveryState): Promise<void> {

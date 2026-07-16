@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,10 +18,10 @@ function initiative(root: string): InitiativeState {
 }
 const project = (root: string): ProjectContext => ({ projectId: "p1", projectRoot: root, projectName: "fixture", cmuxWorkspaceId: "w1", cmuxSurfaceId: "s1" });
 
-async function harness(options: { verdicts?: Array<"approved" | "changes_requested">; checkExit?: number; mutate?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "controller-")); const calls: string[] = []; let diffCalls = 0; const verdicts = [...(options.verdicts ?? ["approved"])];
-  const runner: CommandRunner = { async run(command, args) { calls.push(`${command} ${args.join(" ")}`); return { stdout: "", stderr: "", exitCode: options.checkExit ?? 0 }; } };
-  const git: any = { preflight: async () => ({ baseSha: "base", remote: "origin" }), createWorktree: async () => root, diff: async () => { diffCalls++; return options.mutate && diffCalls >= 3 ? diffB : diffA; }, commit: async () => { calls.push("commit"); return "commit"; }, pushedSha: async () => undefined, push: async () => calls.push("push") };
+async function harness(options: { verdicts?: Array<"approved" | "changes_requested">; checkExit?: number; checkExits?: number[]; mutate?: boolean } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "controller-")); const calls: string[] = []; let diffCalls = 0; const verdicts = [...(options.verdicts ?? ["approved"])]; const checkExits = [...(options.checkExits ?? [])];
+  const runner: CommandRunner = { async run(command, args) { calls.push(`${command} ${args.join(" ")}`); return { stdout: "", stderr: "", exitCode: checkExits.shift() ?? options.checkExit ?? 0 }; } };
+  const git: any = { preflight: async () => ({ baseSha: "base", remote: "origin" }), createWorktree: async () => root, diff: async () => { diffCalls++; return options.mutate && diffCalls >= 4 ? diffB : diffA; }, commit: async () => { calls.push("commit"); return "commit"; }, pushedSha: async () => undefined, push: async () => calls.push("push") };
   const github: any = { assertPublishable: async () => ({ nameWithOwner: "example/repo", visibility: "PUBLIC" }), reconcilePr: async () => { calls.push("pr"); return "https://example.invalid/pr/1"; }, observeCi: async () => "success" };
   const cmux: any = { ensureTopology: async (value: any) => value ?? { paneId: "p", implementerSurfaceId: "i", reviewerSurfaceId: "r" }, attachLogs: async () => {}, update: async () => {}, flash: async () => {} };
   const worker = async (role: string, _cwd: string, prompt: string) => { calls.push(role); if (role === "reviewer") { const verdict = verdicts.shift() ?? "approved"; const hash = prompt.includes(diffB.hash) ? diffB.hash : diffA.hash; return { text: JSON.stringify({ verdict, diffHash: hash, findings: verdict === "approved" ? [] : ["fix it"] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 } }; } return { text: "done", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 } }; };
@@ -41,6 +41,21 @@ test("controller returns findings and fails after three requested-change passes"
 test("controller fails closed on checks and re-reviews check-mutated diffs", async () => {
   const failed = await harness({ checkExit: 1 }); const failedState = await failed.controller.run(initiative(failed.root), project(failed.root)); assert.equal(failedState.phase, "failed"); assert.match(failedState.failure!, /check failed/);
   const changed = await harness({ mutate: true, verdicts: ["approved", "approved"] }); const changedState = await changed.controller.run(initiative(changed.root), project(changed.root)); assert.equal(changedState.phase, "completed"); assert.equal(changedState.reviewPass, 2);
+});
+test("controller resumes a reviewed diff after a check failure without rerunning workers", async () => {
+  const h = await harness({ checkExits: [1, 0] }); const item = initiative(h.root);
+  const failed = await h.controller.run(item, project(h.root)); assert.equal(failed.phase, "failed");
+  const workerCalls = h.calls.filter((call) => call === "implementer" || call === "reviewer").length;
+  const resumed = await h.controller.run(item, project(h.root), failed); assert.equal(resumed.phase, "completed");
+  assert.equal(h.calls.filter((call) => call === "implementer" || call === "reviewer").length, workerCalls);
+});
+test("controller prepares pnpm dependencies in a new isolated worktree", async () => {
+  const h = await harness(); const item = initiative(h.root);
+  item.contract!.delivery!.checks = [["pnpm", "--filter", "example", "typecheck"]];
+  item.approved!.contentHash = contractHash(item.contract!);
+  await writeFile(join(h.root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  const state = await h.controller.run(item, project(h.root)); assert.equal(state.phase, "completed");
+  assert.ok(h.calls.includes("pnpm install --frozen-lockfile"));
 });
 test("controller rejects contract drift and reconciles publication without duplicate commit", async () => {
   const h = await harness(); const item = initiative(h.root); const state = h.controller.create(item); item.contract!.title = "drift";

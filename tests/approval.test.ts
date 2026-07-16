@@ -28,6 +28,9 @@ test("normalizes case, surrounding whitespace, and punctuation", () => {
 test("recognizes natural implementation start directives", () => {
   assert.equal(isImplementationStartDirective("ok lets start the implementation then"), true);
   assert.equal(isImplementationStartDirective("confirm lets proceed"), true);
+  assert.equal(isImplementationStartDirective("implement VMA-41"), true);
+  assert.equal(isImplementationStartDirective("work on VMA-41"), true);
+  assert.equal(isImplementationStartDirective("fix this issue"), true);
   assert.equal(isImplementationStartDirective("retry"), false);
   assert.equal(isImplementationStartDirective("should we start implementation?"), false);
   assert.equal(isImplementationStartDirective("do not start implementation"), false);

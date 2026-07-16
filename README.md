@@ -12,9 +12,9 @@ A global CTO/orchestration layer that keeps Pi's native sessions and cmux projec
 
 Current foundation:
 
-- Conversational Feature and Bug contract design with private local snapshots
-- Optional Linear destinations; local-only contracts report **“GitHub/docs-only; no Linear mutation.”**
-- Case- and punctuation-tolerant explicit approval, with confirmation for ambiguous acknowledgements
+- Intent-first routing: Linear lookup, planning, administration, and implementation are distinct paths
+- Internal Feature/Bug work orders with optional operator review—not mandatory approval paperwork
+- Optional Linear destinations; local-only work orders report **“GitHub/docs-only; no Linear mutation.”**
 - [`@alasano/pi-linear`](https://pi.dev/packages/@alasano/pi-linear?name=linear) for Linear reads and approved contract persistence
 - A generic, non-Linear MCP bridge with static headers and deny-by-default allowlists
 - Read-only scouts, native session names, usage records, and `/team-overview`
@@ -33,7 +33,7 @@ Linear administration is separate from implementation approval. Explicit request
 
 Linear publication is separate from implementation approval. Requests such as “open a bug in Linear”, “file this issue”, or “record this ticket” create tracking issues directly. “Create this plan and translate it to Linear” may create one new Linear project and populate its planned issues using read-proven team IDs. Neither path drafts a retrospective contract or asks for an implementation phrase. Publication intent is restored from Pi session history, so “retry” after a failed call or `/reload` does not require repeating the original request. Failed API/schema attempts remain retryable, and approved pending creation survives `/reload`. Project publication cannot update an existing project, is capped at 50 issues per turn, and still cannot delete/archive resources or switch workspaces.
 
-Approval follows clear operator intent rather than a magic phrase. “Approve, get it done”, “do it”, “ship it”, “go ahead”, and “mark it done” are accepted without asking the operator to repeat themselves. Only genuinely non-actionable acknowledgements such as a bare “ok” or “looks good” require clarification. A direct completion request—such as “mark it done”, “move it to Done”, or “update it since it’s already done”—resolves the team's completed status, updates only the active issue's workflow state, and reads the issue back before reporting success, without manufacturing an implementation contract. It still cannot target unrelated issues or authorize destructive operations.
+Operator intent is the control plane. “Load/show/summarize VMA-41” performs a read and never creates a contract. “Plan/discuss VMA-41” stays conversational. “Implement/work on/fix VMA-41” authorizes isolated implementation and PR preparation: orchestration creates and approves its work order internally, persists any required Linear metadata, and starts delivery without a second confirmation or slash command. Contract review remains available only when explicitly requested. A direct completion request resolves the team's completed status, updates only the active issue's workflow state, and reads it back. Merge, deployment, production mutation, destructive Linear operations, and unrelated issue writes remain blocked.
 
 Useful optional commands:
 
@@ -46,7 +46,7 @@ Useful optional commands:
 /team-close                   Close local state only
 ```
 
-Approved contracts with a `Delivery` section can enter the explicit delivery phase. Delivery metadata fixes the base branch, work branch, commit message, PR title/body, and argv-based checks into the approved hash.
+Internal work orders with a `Delivery` section fix the base branch, work branch, commit message, PR title/body, and argv-based checks into a hash. The following commands are optional diagnostics/controls; normal implementation intent starts delivery automatically.
 
 ```text
 /team-delivery start          Start from a fresh matching approval
@@ -58,7 +58,7 @@ Approved contracts with a `Delivery` section can enter the explicit delivery pha
 
 Delivery requires a Git repository with `origin`. The isolated worktree starts from freshly fetched `origin/<approved-base>` without modifying or depending on the caller checkout, including when it is dirty or behind. Delivery also requires an authenticated GitHub CLI, a recognized public/private/internal repository, and caller-provided `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`. It creates one right-side Team pane and separate implementer/reviewer surfaces with focus disabled. Worker subprocesses run in an isolated worktree with a trusted path/tool guard; role logs and state stay private under `~/.pi/team-orchestration/`.
 
-The controller permits one implementer and one independent reviewer, caps review at three passes, runs approved checks without a shell plus `git diff --check`, scans the publication diff, commits and pushes without force, reconciles one PR, observes bounded CI state, and stops. It never merges, deploys, deletes branches/remotes, or automatically removes a successful worktree. Failure notifications include the persisted cause. A repeated natural start/retry instruction or `/team-delivery start` resumes a failed run for the same approval; `/team-delivery resume` remains available. Cleanup is explicit and never removes Git or cmux resources.
+The controller prepares pnpm dependencies when needed, permits one implementer and one independent reviewer, caps review at three passes, runs work-order checks without a shell plus `git diff --check`, scans the publication diff, commits and pushes without force, reconciles one PR, observes bounded CI state, and stops. It never merges, deploys, deletes branches/remotes, or automatically removes a successful worktree. Failure notifications include the persisted cause. A repeated natural start/retry instruction or `/team-delivery start` resumes a failed run from its reviewed diff instead of rerunning completed worker passes; `/team-delivery resume` remains available. Cleanup is explicit and never removes Git or cmux resources.
 
 The compact footer preserves model, branch, and unrelated extension statuses while adding context level, initiative state, workers, and action count. `/team-overview` is live, scrollable, and includes worker/check/action state. Context colors change at 60% and 80%; no automatic compaction occurs.
 

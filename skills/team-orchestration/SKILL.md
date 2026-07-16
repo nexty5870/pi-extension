@@ -7,6 +7,13 @@ description: CTO-led design orchestration for features and bugs using local cont
 
 Treat the current Git repository and caller cmux workspace as the project. Keep Pi's native sessions and never change cmux focus automatically.
 
+## Intent routing
+
+- **Load/show/inspect/summarize a Linear issue:** read and respond directly. Never create a contract.
+- **Plan/discuss:** stay conversational and ask only genuinely missing decisions.
+- **Implement/build/fix/work on:** this is authorization for isolated worktree and PR preparation. Create the complete work order internally, allow orchestration to auto-approve it, persist required Linear metadata, and call `team_delivery_start` without another confirmation.
+- **Review the contract:** only enter manual review when the operator explicitly requests it.
+
 ## Design mode
 
 1. Understand the request conversationally and ask one meaningful decision question at a time.
@@ -27,11 +34,11 @@ Explicit operator requests to update priority, labels, assignment, scheduling, o
 
 When the operator explicitly asks to publish, translate, sync, put, or move a completed plan into Linear, that instruction authorizes materialization without another contract or implementation phrase. Never call generic `mcp_*` tools. Use pi-linear reads to resolve teams and check projects. If the project does not exist, call `linear_save_project` in create mode only (omit `projectId`) with the planned name/content and read-proven `teamIds`. Create the plan's issues only in the returned project ID, read back the project and issues, summarize identifiers/URLs, and stop. Correct and retry failed calls without reapproval. Publication intent is restored from session history across `/reload`; a later “retry” continues it until the operator explicitly cancels. Do not implement, merge, or deploy.
 
-## Review and approval
+## Optional review and approval
 
-Call `team_contract_draft` only with a complete Feature or Bug contract. Show its full Markdown. `/team-contract open` is an optional explicit Zed review action; never open or focus Zed automatically.
+Call `team_contract_draft` only with a complete Feature or Bug work order. For an explicit implementation directive it is internal and auto-approved: do not dump its Markdown or pause. Show full Markdown only when the operator requested review. `/team-contract open` is an optional explicit Zed review action; never open or focus Zed automatically.
 
-After a review-ready contract, call `team_contract_approve` whenever the operator clearly accepts or directs action. Do not require them to mention both the contract and implementation, and never make them repeat clear intent. `team_contract_approve` is an agent tool; `/team-contract approve` is not a valid command and must never be suggested. Examples include:
+For a review-first contract, call `team_contract_approve` whenever the operator clearly accepts or directs action. Do not require them to mention both the contract and implementation, and never make them repeat clear intent. `team_contract_approve` is an agent tool; `/team-contract approve` is not a valid command and must never be suggested. Examples include:
 
 - “Approve, get it done”
 - “do it”
@@ -42,7 +49,7 @@ After a review-ready contract, call `team_contract_approve` whenever the operato
 
 Only a genuinely non-actionable acknowledgement such as a bare “ok” or “looks good” is ambiguous. Ask once in that case. Unconsumed explicit approval remains valid through a retry or `/reload`; do not ask the operator to repeat it. A direct request to mark an existing active issue done is an operator workflow instruction, not a reason to invent a retrospective implementation contract. Resolve the team's completed status, update only the active issue's `stateId`, read the issue back, and report success only after the completed status is confirmed.
 
-Approval is stored locally first. If no Linear destination is configured, report exactly: **GitHub/docs-only; no Linear mutation.** If a destination is configured, use the exact pi-linear persistence plan returned by `team_contract_approve`.
+Authorization is stored locally first. If no Linear destination is configured, report exactly: **GitHub/docs-only; no Linear mutation.** If a destination is configured, use the exact pi-linear persistence plan returned by either auto-approved `team_contract_draft` or `team_contract_approve`.
 
 ## Linear safety
 
@@ -61,8 +68,8 @@ Approval is stored locally first. If no Linear destination is configured, report
 
 ## Delivery
 
-A freshly approved contract with complete delivery metadata starts through `team_delivery_start` when the operator clearly directs implementation; do not make them run a slash command after they already said to proceed. `/team-delivery start` remains an optional operator shortcut and idempotently resumes a failed run for the same approval. Confirm that the current contract hash still matches approval, optional Linear persistence is complete, and the Git/GitHub/cmux preflight succeeds. Delivery uses freshly fetched `origin/<approved-base>` in its isolated worktree; do not block on or mutate a dirty/behind caller checkout. Delivery uses one isolated implementer, one independent reviewer, at most three review passes, approved argv checks, publication scanning, and durable recovery.
+An internally authorized work order with complete delivery metadata starts through `team_delivery_start` when the operator clearly directs implementation; do not make them run a slash command after they already said to proceed. `/team-delivery start` remains an optional operator shortcut and idempotently resumes a failed run for the same approval. Confirm that the current contract hash still matches approval, optional Linear persistence is complete, and the Git/GitHub/cmux preflight succeeds. Delivery uses freshly fetched `origin/<approved-base>` in its isolated worktree; do not block on or mutate a dirty/behind caller checkout. Delivery prepares pnpm dependencies when required and uses one isolated implementer, one independent reviewer, at most three review passes, work-order argv checks, publication scanning, and durable recovery. A retry continues a still-matching reviewed diff instead of discarding completed work or exhausting review passes.
 
-Use `/team-delivery show` for inspection, `resume` for idempotent reconciliation, `abort` to stop and retain diagnostics, and explicitly confirmed `cleanup` only for failed/aborted private state. Never infer permission to start delivery from contract approval alone.
+Use `/team-delivery show` for inspection, `resume` for idempotent reconciliation, `abort` to stop and retain diagnostics, and explicitly confirmed `cleanup` only for failed/aborted private state. Never infer permission to merge, deploy, mutate production, or perform destructive actions from work-order authorization.
 
 Delivery may create a worktree/branch, commit, push normally, and open or reconcile the approved GitHub PR. It must stop before merge or deployment. Never force-push, delete branches/remotes, remove a successful worktree automatically, mutate Linear from a worker, or change/focus the operator's cmux workspace.

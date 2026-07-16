@@ -46,6 +46,7 @@ export interface DeliveryState {
   ciState?: "pending" | "success" | "failure" | "cancelled" | "timed-out" | "none";
   reviewPass: number;
   reviewedDiffHash?: string;
+  dependencySetupComplete?: boolean;
   workers: Partial<Record<WorkerRole, WorkerSnapshot>>;
   checks: CheckResult[];
   actions: OperatorAction[];

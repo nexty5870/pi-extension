@@ -74,7 +74,7 @@ export function isImplementationStartDirective(text: string): boolean {
   const normalized = normalizeApprovalText(text);
   const negated = /\b(?:do not|don t|never|not)\b.*\b(?:start|begin|launch|implement|proceed|continue)\b/.test(normalized);
   const deliberative = /^(?:should|shall) (?:we|i)\b/.test(normalized);
-  const concrete = /\b(?:start|begin|launch|kick off)\b.{0,80}\b(?:implementation|delivery|work)\b/.test(normalized) || /\bimplement(?: it| this| the)?\b/.test(normalized);
+  const concrete = /\b(?:start|begin|launch|kick off)\b.{0,80}\b(?:implementation|delivery|work)\b/.test(normalized) || /\bimplement(?: it| this| the)?\b/.test(normalized) || /\b(?:build|fix|deliver|work on)\b.{0,80}\b(?:this|feature|bug|issue|[a-z][a-z0-9]+ \d+)\b/.test(normalized);
   const continuation = /^(?:yes |confirm |confirmed |please )?(?:let s |lets )?(?:proceed|continue|do it|get it done|make it happen)(?: with (?:it|implementation|delivery|the contract))?\b/.test(normalized);
   return !negated && !deliberative && (concrete || continuation);
 }
