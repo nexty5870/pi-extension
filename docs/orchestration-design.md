@@ -148,7 +148,7 @@ State is partitioned by stable Git-root project ID and initiative ID. Atomic fil
 
 `/team-overview` is a read-only overlay. `/team-close` changes local state only and never contacts Linear.
 
-## Delivery-worker milestone
+## Fleet execution V2
 
 Deliverable contracts add hash-covered metadata for the base branch, work branch, commit message, PR title/body, and validation argv arrays. Natural implementation directives call `team_delivery_start`; `/team-delivery start` remains an operator shortcut. Start requires a current approval hash, completed optional Linear persistence, a freshly fetched `origin/<approved-base>` used in an isolated worktree regardless of caller checkout dirt/divergence, an authenticated GitHub repository with recognized public/private/internal visibility, and authoritative caller cmux IDs. Repeating start for the same failed approval resumes its durable run.
 
@@ -156,7 +156,9 @@ The durable phases are preflight, worktree creation, implementation, review, che
 
 One implementer and one reviewer run as isolated Pi JSON subprocesses. Discovered extensions and skills are disabled; repository context remains trusted; an explicitly loaded guard confines paths and symlinks, denies sensitive files, strips Linear access, prevents publication/deployment commands, and makes the reviewer read-only. Reviewer output is strict JSON bound to the exact diff hash. Three requested-change passes exhaust the run.
 
-The controller prepares pnpm dependencies for pnpm worktrees using an explicit `packageManager` version when present, otherwise a lockfile-compatible Corepack version (lockfile v9 → pnpm 9; v6 → pnpm 8). It never uses an arbitrary global pnpm to rewrite a newer lockfile; frozen-lockfile failures retain the output and include its tail in the operator notification. Work-order checks execute as argv without a shell, followed by `git diff --check`. A failed run with an unchanged reviewed diff resumes at setup/check/publication rather than rerunning completed implementer/reviewer passes. A check-mutated diff requires another independent review. The final reviewed hash must equal the publication diff. A public-safety scan checks changed paths and content before staging.
+The controller prepares pnpm dependencies for pnpm worktrees using an explicit `packageManager` version when present, otherwise a lockfile-compatible Corepack version (lockfile v9 → pnpm 9; v6 → pnpm 8). It never uses an arbitrary global pnpm to rewrite a newer lockfile; frozen-lockfile failures retain the output and include its tail in the operator notification.
+
+For new runs, work-order checks execute once on the untouched fetched base before implementation. Post-review checks are compared with that evidence. A newly failing check dispatches a bounded implementer repair plus independent diff-hash review and then restarts validation automatically. A check already red on the base is retained as a visible warning and does not discard reviewed work. Environment-blocked legacy runs without baseline evidence are migrated conservatively: failures become PR review warnings rather than an endless retry loop. `git diff --check` always remains a hard regression gate. A check-mutated diff requires another independent review. The final reviewed hash must equal the publication diff. A public-safety scan checks changed paths and content before staging.
 
 Git publication never force-pushes. GitHub publication preserves the target repository's recognized visibility, reconciles at most one exact PR, observes CI to a bounded terminal state, and stops with an operator action. Merge, deployment, branch/remote deletion, and automatic successful-worktree removal do not exist in the controller.
 
@@ -170,12 +172,12 @@ The CTO design session itself still blocks project mutation. Read-only scouts re
 
 [`../examples/mcp.example.json`](../examples/mcp.example.json) is intentionally neutral and non-Linear. Copy it manually only when a generic MCP server is needed. Never commit the private copy.
 
-## Classic TODO
+## Remaining fleet work
 
-- [ ] Dogfood delivery end-to-end on a disposable public fixture in cmux, including an actual test PR and visual focus-theft verification, before enabling it on any sensitive repository.
+- [ ] Add a project-level Linear dependency-graph scheduler that can run independent issue worktrees concurrently with a configured concurrency cap.
+- [ ] Give each active issue its own cmux surface group and aggregate status in the lead workspace; Pi workers remain guarded subprocesses because cmux has no native Pi agent-session provider.
 - [ ] Add opt-in handling for post-publication CI failures; keep every code change behind a new review/check cycle.
-- [ ] Consider parallel/distributed workers only after the single implementer/reviewer state machine has production evidence.
-- [ ] Keep merge, deploy, and destructive cleanup operator-controlled.
+- [ ] Keep merge, deploy, production mutation, and destructive cleanup operator-controlled.
 
 ## Acceptance checks
 
