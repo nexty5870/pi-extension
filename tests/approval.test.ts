@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyApprovalIntent, isCompletionDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, normalizeApprovalText, restoreLinearPlanPublishIntent } from "../extensions/orchestration/approval.ts";
+import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, normalizeApprovalText, restoreLinearPlanPublishIntent } from "../extensions/orchestration/approval.ts";
 
 for (const phrase of [
   "Approve contract and start implementation",
@@ -52,6 +52,14 @@ test("recognizes explicit publication of a completed plan to Linear", () => {
   assert.equal(restoreLinearPlanPublishIntent(["create this plan and translate it to Linear", "retry with the canonical IDs"]), true);
   assert.equal(isLinearPlanPublishCancelDirective("cancel the Linear publication"), true);
   assert.equal(restoreLinearPlanPublishIntent(["publish the roadmap into Linear", "cancel the Linear publication", "retry"]), false);
+});
+
+test("recognizes explicit administration for named Linear issues", () => {
+  assert.deepEqual(extractLinearIssueIdentifiers("Update DEMO-41 and demo-42; DEMO-41 blocks DEMO-43"), ["DEMO-41", "DEMO-42", "DEMO-43"]);
+  assert.equal(isLinearIssueAdminDirective("apply the labels, high priority, and blockers"), true);
+  assert.equal(isLinearIssueAdminDirective("yes apply both changes"), true);
+  assert.equal(isLinearIssueAdminDirective("should we update the labels?"), false);
+  assert.equal(isLinearIssueAdminDirective("do not update these issues"), false);
 });
 
 test("does not promote vague acknowledgements or negation to approval", () => {

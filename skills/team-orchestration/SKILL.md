@@ -19,6 +19,10 @@ Treat the current Git repository and caller cmux workspace as the project. Keep 
 
 When the operator asks to open, file, log, add, or record a Linear bug, issue, or ticket, treat that as an administrative tracking request—not implementation design. Do not create a retrospective contract, call `team_contract_approve`, mention an implementation approval phrase, or ask for approval again. Gather only missing issue content or destination details, resolve canonical IDs with read tools, call `linear_create_issue`, and read the issue back. If the API/schema call fails, correct and retry; authorization is consumed only after successful creation. If an approved pending contract already exists, its creation authorization remains valid across failed calls and `/reload`.
 
+## Direct Linear administration
+
+Explicit operator requests to update priority, labels, assignment, scheduling, or dependencies/relations on named issues are administrative actions, not implementation contracts. Use the issue identifiers in the operator's request or immediately preceding proposal as the exact authorization scope. Resolve canonical issue/resource IDs with reads, perform only the requested `linear_update_issue` and `linear_create_issue_relation` operations, read results back, and stop. Never demand contract approval or tell the operator to apply these changes manually.
+
 ## Linear plan publication
 
 When the operator explicitly asks to publish, translate, sync, put, or move a completed plan into Linear, that instruction authorizes materialization without another contract or implementation phrase. Never call generic `mcp_*` tools. Use pi-linear reads to resolve teams and check projects. If the project does not exist, call `linear_save_project` in create mode only (omit `projectId`) with the planned name/content and read-proven `teamIds`. Create the plan's issues only in the returned project ID, read back the project and issues, summarize identifiers/URLs, and stop. Correct and retry failed calls without reapproval. Publication intent is restored from session history across `/reload`; a later “retry” continues it until the operator explicitly cancels. Do not implement, merge, or deploy.
@@ -48,6 +52,7 @@ Approval is stored locally first. If no Linear destination is configured, report
 - For approved issue creation, supply canonical destination identifiers and let orchestration inject the exact approved title and managed description. Never reconstruct hidden markers or request reapproval for persistence formatting.
 - After every write, call `linear_get_issue` and report success only when the requested destination/content/status is confirmed.
 - A direct operator tracking request may call `linear_create_issue` without an implementation contract; fields are restricted and destination IDs must be read-proven.
+- Explicit administration may update supported fields or create relations only for issues named by the operator; both relation endpoints must be in that set.
 - Explicit plan publication may create one project and up to 50 scoped issues in the same turn. Existing project updates and all destructive project operations remain blocked.
 - Approved planned issue creation remains authorized durably until successful persistence, including across failed calls and `/reload`; update/comment operations remain scoped to the active issue.
 - Never delete, archive, mutate unrelated projects/documents, switch workspaces, or use unknown `linear_*` tools.

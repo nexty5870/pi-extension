@@ -8,6 +8,7 @@ const SCOPED_WRITES = new Set([
   "linear_create_comment",
   "linear_update_comment",
   "linear_save_project",
+  "linear_create_issue_relation",
 ]);
 
 export function classifyLinearTool(toolName: string): LinearToolClass {
@@ -91,6 +92,13 @@ function sameLinearResource(expected: string, actual: string, aliases?: Readonly
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+function isAuthorizedIssue(reference: string | undefined, authorized?: ReadonlySet<string>, aliases?: ReadonlyMap<string, string>): boolean {
+  if (!reference || !authorized?.size) return false;
+  if (authorized.has(reference) || authorized.has(reference.toUpperCase())) return true;
+  const referenceId = resolvedLinearId(reference, aliases) ?? reference;
+  return [...authorized].some((item) => (resolvedLinearId(item, aliases) ?? item) === referenceId);
+}
+
 export interface LinearPolicyContext {
   initiative?: InitiativeState;
   allowCreateIssue?: boolean;
@@ -100,6 +108,9 @@ export interface LinearPolicyContext {
   allowPlanProjectCreate?: boolean;
   allowPlanIssueCreate?: boolean;
   planProjectIds?: ReadonlySet<string>;
+  /** Operator-directed administration scoped to issue identifiers named in the conversation. */
+  allowIssueAdmin?: boolean;
+  adminIssueRefs?: ReadonlySet<string>;
   /** One-turn capability created by a direct operator request such as “mark it done”. */
   allowWorkflowUpdate?: boolean;
   completedStatusIds?: ReadonlySet<string>;
@@ -124,7 +135,30 @@ export function authorizeLinearTool(
     return { allowed: false, reason: `Unknown Linear tool ${toolName} is blocked by default` };
   }
 
-  if (toolName.toLowerCase() === "linear_save_project") {
+  const lowerToolName = toolName.toLowerCase();
+  if (context.allowIssueAdmin && lowerToolName === "linear_update_issue") {
+    const target = issueReference(args);
+    if (!isAuthorizedIssue(target, context.adminIssueRefs, context.resourceAliases)) {
+      return { allowed: false, reason: "Issue administration must target an issue explicitly named by the operator" };
+    }
+    if (!hasOnlyKeys(args, ["issue", "priority", "stateId", "assigneeId", "dueDate", "clearDueDate", "estimate", "addedLabelIds", "removedLabelIds", "labelIds", "projectId", "parentId", "cycleId"])) {
+      return { allowed: false, reason: "Issue administration contains unsupported fields" };
+    }
+    return { allowed: true };
+  }
+  if (context.allowIssueAdmin && lowerToolName === "linear_create_issue_relation") {
+    const issueId = stringAt(args, ["issueId"]);
+    const relatedIssueId = stringAt(args, ["relatedIssueId"]);
+    if (!isAuthorizedIssue(issueId, context.adminIssueRefs, context.resourceAliases) || !isAuthorizedIssue(relatedIssueId, context.adminIssueRefs, context.resourceAliases)) {
+      return { allowed: false, reason: "Issue relations must connect issues explicitly named by the operator" };
+    }
+    if (!hasOnlyKeys(args, ["issueId", "relatedIssueId", "type"]) || !["blocks", "duplicate", "related", "similar"].includes(String(args.type))) {
+      return { allowed: false, reason: "Issue relation type must be blocks, duplicate, related, or similar" };
+    }
+    return { allowed: true };
+  }
+
+  if (lowerToolName === "linear_save_project") {
     if (!context.allowPlanProjectCreate) {
       return { allowed: false, reason: "Project creation requires a direct operator request to publish a plan to Linear" };
     }

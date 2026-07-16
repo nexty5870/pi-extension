@@ -50,7 +50,9 @@ With neither a team nor issue, validation succeeds and rendering says:
 
 A team means approval may create an issue. An issue ID or identifier means approval may update that issue. Drafting and reloading Markdown never contact Linear.
 
-## Direct Linear tracking
+## Direct Linear tracking and administration
+
+Routine Linear administration is not governed by implementation contracts. An explicit operator request may update priority, labels, assignment, scheduling, project/parent/cycle references, or create `blocks`/`duplicate`/`related`/`similar` relations for issues named in the request or immediately preceding assistant proposal. The extension extracts that finite issue set; update targets and both relation endpoints must resolve to it. Unsupported fields, unnamed issues, relation mutation/deletion, project mutation, and destructive operations remain blocked. Results are read back and the operator is never told to perform authorized changes manually.
 
 Tracking administration is intentionally separate from implementation contracts. A direct operator request to open, create, file, log, add, or record a Linear bug/issue/ticket grants a one-turn issue-creation capability without drafting or approving a contract. The agent gathers only missing tracking details, resolves canonical destination IDs with read tools, creates the issue with restricted fields, and reads it back.
 
@@ -170,6 +172,7 @@ The CTO design session itself still blocks project mutation. Read-only scouts re
 - Local-only approval stores state and performs no network/integration call.
 - Clear acceptance/action intent works without prescribed wording; bare acknowledgements, deliberative questions, and negation do not approve.
 - Direct completion instructions can update only workflow fields on the exact active issue without retrospective contract ceremony.
+- Explicit updates/relations are scoped to operator-named issues and require no implementation contract.
 - Direct tracking requests create restricted Linear issues without implementation contracts or approval ceremony.
 - Explicit plan publication can create one project plus bounded scoped issues without generic MCP or implementation approval.
 - Configured Linear destinations produce create/update plans, retain pending authorization across failure/reload, and persist result metadata.
