@@ -20,6 +20,8 @@ All `linear_*` tool calls are intercepted regardless of which third-party extens
 
 ## Delivery workers and publication
 
+A clear implementation directive authorizes only internal work-order creation and isolated branch/worktree/PR preparation. It does not authorize merge, deployment, production mutation, destructive operations, or unrelated Linear writes; those boundaries do not depend on contract ceremony.
+
 Delivery workers run with extension/skill discovery disabled and a trusted guard loaded explicitly. The guard confines file tools to the canonical worktree, validates symlinks, denies sensitive filenames, strips Linear credentials, blocks Linear/MCP access, prevents worker push/merge/deploy commands, and makes reviewers read-only. Private prompts, logs, reviews, checks, and state use `0600` files outside the repository.
 
 Before publication, the controller requires authenticated GitHub metadata with recognized public/private/internal visibility and scans changed files for sensitive names, credential patterns, private absolute paths, file-count limits, and file-size limits. Git and GitHub operations use argv execution without a shell, never force-push, and never invoke merge, deployment, branch deletion, remote deletion, or automatic successful-worktree cleanup. cmux operations target the caller workspace and use focus-disabled creation; surfaces are display-only rather than an orchestration control protocol.

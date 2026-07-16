@@ -50,6 +50,17 @@ With neither a team nor issue, validation succeeds and rendering says:
 
 A team means approval may create an issue. An issue ID or identifier means approval may update that issue. Drafting and reloading Markdown never contact Linear.
 
+## Intent-first control plane
+
+Operator intent, not the contract artifact, controls routing:
+
+- `load/show/inspect/summarize VMA-41` performs pi-linear reads and returns the issue directly;
+- `plan/discuss VMA-41` remains conversational;
+- `implement/build/fix/work on VMA-41` authorizes isolated implementation and PR preparation;
+- explicit contract review enters the optional manual review path.
+
+For implementation intent, `team_contract_draft` stores the complete hash-covered work order privately and auto-approves it. The agent does not dump Markdown or request another confirmation. It completes required Linear persistence and calls `team_delivery_start`. This authorization never includes merge, deployment, production mutation, destructive operations, or unrelated Linear writes.
+
 ## Direct Linear tracking and administration
 
 Routine Linear administration is not governed by implementation contracts. An explicit operator request may update priority, labels, assignment, scheduling, project/parent/cycle references, or create `blocks`/`duplicate`/`related`/`similar` relations for issues named in the request or immediately preceding assistant proposal. The extension extracts that finite issue set; update targets and both relation endpoints must resolve to it. Unsupported fields, unnamed issues, relation mutation/deletion, project mutation, and destructive operations remain blocked. Results are read back and the operator is never told to perform authorized changes manually.
@@ -60,15 +71,15 @@ Creation authorization is consumed only after a successful result containing an 
 
 An explicit request to publish/translate/sync a completed plan to Linear grants a bounded publication capability. The agent uses pi-linear—not generic MCP—to resolve teams and existing projects. It may create one project with `linear_save_project` only when `projectId`/`id` are omitted, then create at most 50 issues scoped to the returned project ID. Existing project updates, unrelated project IDs, destructive operations, implementation, merge, and deployment remain blocked. Failures are retryable and all created resources are read back. Publication intent is reconstructed from user messages on session start/tree restoration and remains armed across agent settlement; “retry” therefore works after `/reload` without repeating the original request. An explicit cancel/stop publication instruction clears it.
 
-## Review and approval
+## Optional review and approval
 
-`team_contract_draft` validates a complete draft, renders all Markdown in Pi, writes a private snapshot, and enters `review`. Zed opens only after explicit `/team-contract open`; `/team-contract reload` reparses and validates operator edits.
+Without implementation intent, `team_contract_draft` validates a complete review-first draft, renders its Markdown in Pi, writes a private snapshot, and enters `review`. Zed opens only after explicit `/team-contract open`; `/team-contract reload` reparses and validates operator edits. With implementation intent, the same tool treats the contract as an internal work order and atomically records local approval without pausing.
 
 The input hook normalizes Unicode, case, surrounding whitespace, and punctuation, then recognizes clear acceptance or action intent. `Confirm, let's proceed`, `approve, get it done`, `approved`, `do it`, `ship it`, `go ahead`, `proceed`, and `mark it done` cross the approval gate after a review-ready contract. The operator does not need to separately mention implementation or repeat prescribed wording. Approval is invoked through the agent's `team_contract_approve` tool; `/team-contract approve` does not exist and must never be suggested.
 
 Only genuinely non-actionable acknowledgements such as a bare `ok` or `looks good` remain ambiguous. Negated instructions and deliberative questions such as `should we?` do not approve; direct requests such as `can you mark it done?` do. A direct completion instruction creates a one-turn capability for workflow fields on the exact active Linear issue. The requested `stateId` must come from a completed team status discovered in that turn, and the issue is read back before success is reported. Unrelated fields, issues, creation, destructive tools, and workspace changes remain blocked.
 
-`team_contract_approve` consumes a contract-scoped capability. Unconsumed clear approval remains available across agent settlement and is reconstructed from session history after `/reload`; a new contract draft clears it. It reloads the local Markdown, validates it again, and stores a local approval record before any optional integration call. Local-only approval does not initialize MCP or call Linear.
+On the optional review-first path, `team_contract_approve` consumes a contract-scoped capability. Unconsumed clear approval remains available across agent settlement and is reconstructed from session history after `/reload`; a new contract draft clears it. It reloads the local Markdown, validates it again, and stores a local approval record before any optional integration call. Local-only approval does not initialize MCP or call Linear.
 
 Approval records distinguish:
 
@@ -145,7 +156,7 @@ The durable phases are preflight, worktree creation, implementation, review, che
 
 One implementer and one reviewer run as isolated Pi JSON subprocesses. Discovered extensions and skills are disabled; repository context remains trusted; an explicitly loaded guard confines paths and symlinks, denies sensitive files, strips Linear access, prevents publication/deployment commands, and makes the reviewer read-only. Reviewer output is strict JSON bound to the exact diff hash. Three requested-change passes exhaust the run.
 
-Approved checks execute as argv without a shell, followed by `git diff --check`. A check-mutated diff requires another independent review. The final reviewed hash must equal the publication diff. A public-safety scan checks changed paths and content before staging.
+The controller prepares pnpm dependencies for pnpm worktrees. Work-order checks execute as argv without a shell, followed by `git diff --check`. A failed run with an unchanged reviewed diff resumes at setup/check/publication rather than rerunning completed implementer/reviewer passes. A check-mutated diff requires another independent review. The final reviewed hash must equal the publication diff. A public-safety scan checks changed paths and content before staging.
 
 Git publication never force-pushes. GitHub publication preserves the target repository's recognized visibility, reconciles at most one exact PR, observes CI to a bounded terminal state, and stops with an operator action. Merge, deployment, branch/remote deletion, and automatic successful-worktree removal do not exist in the controller.
 

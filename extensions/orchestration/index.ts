@@ -180,6 +180,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   let manager: McpManager | undefined;
   let approvalArmed = false;
   let approvalIntent: ApprovalIntent = "none";
+  let implementationIntentArmed = false;
   let operatorIssueCreateArmed = false;
   let operatorIssueAdminArmed = false;
   let operatorIssueAdminRefs = new Set<string>();
@@ -245,6 +246,26 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     return initiative;
   };
 
+  const approveActiveContract = async (ctx: ExtensionContext) => {
+    if (!initiative?.contract) throw new Error("No review-ready contract is active");
+    await reloadContract();
+    if (!initiative?.contract) throw new Error("Contract disappeared while reloading");
+    const approvedAt = new Date().toISOString();
+    const approved = approveContractLocally(initiative.contract, approvedAt);
+    const persistence = planLinearPersistence(initiative.contract, approvedAt);
+    initiative.approved = approved;
+    initiative.status = "approved";
+    const markdown = `${renderContract(initiative.contract)}\n---\n\n**Approved at:** ${approvedAt}\n\n**Content hash:** \`${approved.contentHash}\`\n`;
+    initiative.contractPath = await store.writeContract(initiative, markdown);
+    await saveInitiative(initiative);
+    await store.writeEvent(initiative, "contract.approved", approved as unknown as Record<string, unknown>);
+    ctx.ui.setStatus("team-orchestration", `approved: ${initiative.contract.title}`);
+    const destinationMessage = persistence
+      ? `Linear persistence is pending through @alasano/pi-linear. Resolve human team/project names with linear_list_* or linear_get_* and provide canonical teamId/teamKey/projectId fields. Orchestration will inject the exact approved title and managed description into ${persistence.toolName}; do not reconstruct hidden markers, revise the contract, or request reapproval for formatting or read-proven identifier normalization. Verify the issue by reading it back after the write.`
+      : "GitHub/docs-only; no Linear mutation.";
+    return { approved, destinationMessage, markdown, persistence };
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     project = await resolveProjectContext(ctx.cwd);
     await store.registerProject(project);
@@ -257,6 +278,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     operatorIssueCreateArmed = false;
     linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
+    implementationIntentArmed = false;
     if (initiative) {
       delivery = await new DeliveryStore(store.initiativeDir(initiative)).latest();
       uiSnapshot.delivery = delivery;
@@ -297,6 +319,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     operatorIssueCreateArmed = false;
     linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
+    implementationIntentArmed = false;
   });
 
   pi.on("session_shutdown", async () => {
@@ -317,6 +340,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     else if (approvalIntent === "explicit") approvalArmed = true;
     else if (approvalIntent === "ambiguous") approvalArmed = false;
     const startsImplementation = isImplementationStartDirective(event.text);
+    if (startsImplementation) implementationIntentArmed = true;
     const startsPlanPublication = isLinearPlanPublishDirective(event.text);
     const cancelsPlanPublication = isLinearPlanPublishCancelDirective(event.text) || startsImplementation;
     if (startsPlanPublication && !operatorPlanPublishArmed) {
@@ -496,9 +520,9 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
       : undefined;
     requestFooterRender?.();
     const guidance = `Pi team orchestration is available in this repository.
-For a new feature or bug, work conversationally and ask one decision question at a time. Keep drafts local.
-When the contract is complete, call team_contract_draft with the full standard contract. Its complete Markdown must be shown to the operator.
-Call team_contract_approve after any clear acceptance or action directive, including “confirm, let's proceed”, “approve, get it done”, “do it”, “ship it”, or “mark it done”. team_contract_approve is a tool, not a /team-contract subcommand: /team-contract approve does not exist and must never be suggested. When that directive also asks to start/proceed with implementation, complete required approved Linear persistence and call team_delivery_start yourself; do not require the operator to run /team-delivery start. team_delivery_start also retries a failed run for the same approval. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
+Route by operator intent. A request to load, show, inspect, summarize, or discuss a Linear issue is read-only: use pi-linear reads and respond directly, with no contract or approval ceremony. For planning, work conversationally and ask only decisions that are actually missing.
+A clear request to implement, start, build, fix, or work on an issue is execution authorization for isolated worktree/PR delivery. Create the full standard contract as an internal work order with team_contract_draft; orchestration auto-approves it from that implementation directive. Do not dump the contract Markdown, pause for review, or ask for a second confirmation unless the operator explicitly requested contract review. Complete required approved Linear persistence, then call team_delivery_start yourself. Merge, deployment, production mutation, and destructive actions remain blocked.
+For an explicitly review-first contract without implementation authorization, call team_contract_approve after any clear acceptance or action directive, including “confirm, let's proceed”, “approve, get it done”, “do it”, “ship it”, or “mark it done”. team_contract_approve is a tool, not a /team-contract subcommand: /team-contract approve does not exist and must never be suggested. When that directive also asks to start/proceed with implementation, complete required approved Linear persistence and call team_delivery_start yourself; do not require the operator to run /team-delivery start. team_delivery_start also retries a failed run for the same approval. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
 When invoking pi-linear tools, treat human names and canonical IDs as different representations of the same approved destination, not as scope changes. Before a write that needs teamId, teamKey, projectId, stateId, or another canonical reference, call the relevant linear_list_* or linear_get_* tool and use the exact schema field and canonical value returned. Never place a project name in projectId. A read-proven name-to-ID substitution does not change contract scope, must not increment the contract version, and must not trigger reapproval. For approved issue creation, provide only the canonical destination identifiers; orchestration injects the exact approved title and managed description, so never reconstruct hidden markers or ask for reapproval because of formatting. After every Linear write, read the issue back and report success only after verifying the requested result.
 ${operatorIssueAdminArmed
       ? `The operator explicitly authorized Linear administration for these issues: ${[...operatorIssueAdminRefs].join(", ")}. This is not implementation work and requires no contract or approval. Use pi-linear reads to resolve issue UUIDs, labels, statuses, users, and projects. Apply only the requested priority/label/assignment/scheduling fields with linear_update_issue and only requested blocks/duplicate/related/similar links with linear_create_issue_relation. Every target and both ends of every relation must be in the authorized issue set. Read the changed issues and relations back, summarize results, and stop. Do not ask the operator to make these changes manually.`
@@ -554,6 +578,14 @@ ${operatorIssueAdminArmed
         contractPath: state.contractPath,
       });
 
+      if (implementationIntentArmed) {
+        const result = await approveActiveContract(ctx);
+        return textResult(
+          `Internal work order prepared and approved from the operator's implementation directive.\n\n${result.destinationMessage}\n\nAfter required Linear persistence, call team_delivery_start without requesting another confirmation.`,
+          { state: initiative, approved: result.approved, linearPersistence: result.persistence, autoApproved: true },
+        );
+      }
+
       ctx.ui.setStatus("team-orchestration", `review: ${contract.title}`);
       ctx.ui.notify(`Contract ready for review. Use /team-contract open to review or edit it in Zed.`, "info");
       notifyActionRequired(
@@ -577,26 +609,10 @@ ${operatorIssueAdminArmed
     async execute(_id, _params, _signal, _update, ctx) {
       if (!approvalArmed) throw new Error("The latest operator message was not classified as contract approval. Never suggest `/team-contract approve` because that command does not exist; ask a concise clarification only when the message is genuinely ambiguous.");
       approvalArmed = false;
-      if (!initiative?.contract) throw new Error("No review-ready contract is active");
-      await reloadContract();
-      if (!initiative?.contract) throw new Error("Contract disappeared while reloading");
-
-      const approvedAt = new Date().toISOString();
-      const approved = approveContractLocally(initiative.contract, approvedAt);
-      const persistence = planLinearPersistence(initiative.contract, approvedAt);
-      initiative.approved = approved;
-      initiative.status = "approved";
-      const markdown = `${renderContract(initiative.contract)}\n---\n\n**Approved at:** ${approvedAt}\n\n**Content hash:** \`${approved.contentHash}\`\n`;
-      initiative.contractPath = await store.writeContract(initiative, markdown);
-      await saveInitiative(initiative);
-      await store.writeEvent(initiative, "contract.approved", approved as unknown as Record<string, unknown>);
-      ctx.ui.setStatus("team-orchestration", `approved: ${initiative.contract.title}`);
-      const destinationMessage = persistence
-        ? `Linear persistence is pending through @alasano/pi-linear. Resolve human team/project names with linear_list_* or linear_get_* and provide canonical teamId/teamKey/projectId fields. Orchestration will inject the exact approved title and managed description into ${persistence.toolName}; do not reconstruct hidden markers, revise the contract, or request reapproval for formatting or read-proven identifier normalization. Verify the issue by reading it back after the write.`
-        : "GitHub/docs-only; no Linear mutation.";
+      const result = await approveActiveContract(ctx);
       return textResult(
-        `${markdown}\n${destinationMessage}\n\nV1 stops before code mutation.`,
-        { approved, linearPersistence: persistence },
+        `${result.markdown}\n${result.destinationMessage}\n\nThe approved workflow may now start in its isolated worktree.`,
+        { approved: result.approved, linearPersistence: result.persistence },
       );
     },
   });
@@ -726,6 +742,7 @@ ${operatorIssueAdminArmed
     }
     if (!existing && delivery && !["completed", "failed", "aborted", "action-required"].includes(delivery.phase)) throw new Error("A delivery run already exists");
     const abort = new AbortController(); activeDeliveryAbort = abort;
+    implementationIntentArmed = false;
     void controller.run(initiative!, project!, existing, abort.signal).then((state) => {
       delivery = state;
       if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined;
