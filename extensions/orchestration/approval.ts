@@ -49,6 +49,15 @@ export function isLinearIssueCreateDirective(text: string): boolean {
   return !negated && !deliberative && (actionFirst || resourceFirst);
 }
 
+export function isLinearPlanPublishDirective(text: string): boolean {
+  const normalized = normalizeApprovalText(text);
+  const negated = /\b(?:do not|don t|never|not)\b.*\b(?:publish|translate|sync|create|put|move)\b/.test(normalized);
+  const deliberative = /^(?:should|shall) (?:we|i)\b/.test(normalized);
+  const publish = /\b(?:publish|translate|sync|put|move)\b.{0,120}\b(?:to|into|in) linear\b/.test(normalized);
+  const create = /\bcreate\b.{0,100}\b(?:plan|project|roadmap)\b.{0,100}\b(?:in|on|to|into) linear\b/.test(normalized);
+  return !negated && !deliberative && (publish || create);
+}
+
 export function classifyApprovalIntent(text: string): ApprovalIntent {
   const normalized = normalizeApprovalText(text);
   if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|implement|proceed|continue|ship|mark|complete|close|set|move|update|change)\b/.test(normalized)) return "none";

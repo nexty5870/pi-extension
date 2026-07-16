@@ -39,7 +39,7 @@ test("classifies pi-linear reads, scoped writes, destructive, and unknown tools"
   assert.equal(classifyLinearTool("linear_search_issues"), "read");
   assert.equal(classifyLinearTool("linear_update_issue"), "write");
   assert.equal(classifyLinearTool("linear_delete_issue"), "destructive");
-  assert.equal(classifyLinearTool("linear_save_project"), "unknown");
+  assert.equal(classifyLinearTool("linear_save_project"), "write");
   assert.equal(classifyLinearTool("linear_switch_workspace"), "operator");
 });
 
@@ -92,6 +92,22 @@ test("prevents generic MCP and third-party Linear write bypass", () => {
   assert.equal(isLinearMcpRoute("linear", "update_issue"), true);
   assert.equal(isLinearMcpRoute("other", "linear_update_issue"), true);
   assert.equal(authorizeLinearTool("linear_save_project", {}, { initiative: initiative({ issueId: "issue-1" }) }).allowed, false);
+});
+
+test("allows create-only project publication with read-proven teams", () => {
+  const aliases = collectLinearResourceAliases({ teams: [{ id: "team-uuid", key: "DEMO" }] });
+  const args = { name: "Public roadmap", description: "Approved plan", teamIds: ["team-uuid"] };
+  assert.equal(authorizeLinearTool("linear_save_project", args, { allowPlanProjectCreate: true, resourceAliases: aliases }).allowed, true);
+  assert.equal(authorizeLinearTool("linear_save_project", { ...args, projectId: "existing" }, { allowPlanProjectCreate: true, resourceAliases: aliases }).allowed, false);
+  assert.equal(authorizeLinearTool("linear_save_project", args, { resourceAliases: aliases }).allowed, false);
+});
+
+test("allows plan issues only in the newly created project", () => {
+  const aliases = collectLinearResourceAliases({ teams: [{ id: "team-uuid", key: "DEMO" }] });
+  const args = { teamId: "team-uuid", projectId: "new-project", title: "Milestone", description: "Scoped work" };
+  const context = { allowPlanIssueCreate: true, planProjectIds: new Set(["new-project"]), resourceAliases: aliases };
+  assert.equal(authorizeLinearTool("linear_create_issue", args, context).allowed, true);
+  assert.equal(authorizeLinearTool("linear_create_issue", { ...args, projectId: "other" }, context).allowed, false);
 });
 
 test("allows a direct tracking issue without an implementation contract", () => {

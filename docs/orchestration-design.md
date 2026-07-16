@@ -56,6 +56,8 @@ Tracking administration is intentionally separate from implementation contracts.
 
 Creation authorization is consumed only after a successful result containing an issue ID/identifier. Schema/API failures remain retryable during the turn. Approved contract persistence uses durable `approved.linearPersistence === "pending"` state rather than an in-memory bit, so failed calls and `/reload` do not require reapproval. A single in-flight guard prevents parallel duplicate creation.
 
+An explicit request to publish/translate/sync a completed plan to Linear grants a bounded publication capability. The agent uses pi-linear—not generic MCP—to resolve teams and existing projects. It may create one project with `linear_save_project` only when `projectId`/`id` are omitted, then create at most 50 issues scoped to the returned project ID. Existing project updates, unrelated project IDs, destructive operations, implementation, merge, and deployment remain blocked. Failures are retryable and all created resources are read back.
+
 ## Review and approval
 
 `team_contract_draft` validates a complete draft, renders all Markdown in Pi, writes a private snapshot, and enters `review`. Zed opens only after explicit `/team-contract open`; `/team-contract reload` reparses and validates operator edits.
@@ -169,6 +171,7 @@ The CTO design session itself still blocks project mutation. Read-only scouts re
 - Clear acceptance/action intent works without prescribed wording; bare acknowledgements, deliberative questions, and negation do not approve.
 - Direct completion instructions can update only workflow fields on the exact active issue without retrospective contract ceremony.
 - Direct tracking requests create restricted Linear issues without implementation contracts or approval ceremony.
+- Explicit plan publication can create one project plus bounded scoped issues without generic MCP or implementation approval.
 - Configured Linear destinations produce create/update plans, retain pending authorization across failure/reload, and persist result metadata.
 - pi-linear reads, writes, destructive tools, workspace switching, and unknown tools classify correctly.
 - Third-party `linear_*` tools pass through the same interception boundary.

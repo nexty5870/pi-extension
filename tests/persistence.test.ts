@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { contractFromInput } from "../extensions/orchestration/contracts.ts";
-import { approveContractLocally, isApprovedContractCreatePending, normalizeApprovedIssueCreateArguments, normalizeDirectIssueCreateArguments, planLinearPersistence } from "../extensions/orchestration/persistence.ts";
+import { approveContractLocally, isApprovedContractCreatePending, normalizeApprovedIssueCreateArguments, normalizeDirectIssueCreateArguments, normalizeDirectProjectCreateArguments, planLinearPersistence } from "../extensions/orchestration/persistence.ts";
 
 function contract(linear?: { team?: string; issueId?: string }) {
   return contractFromInput({
@@ -36,6 +36,12 @@ test("approves local-only contracts without planning a Linear contact", () => {
   assert.equal(approved.source, "local");
   assert.equal(approved.linearPersistence, "not-configured");
   assert.equal(planLinearPersistence(local, approvedAt), undefined);
+});
+
+test("normalizes plan project creation to create-only restricted fields", () => {
+  assert.deepEqual(normalizeDirectProjectCreateArguments({ input: {
+    projectId: "must-drop", name: "Public roadmap", description: "Plan", content: "Details", teamIds: ["team-1"], statusId: "drop",
+  } }), { name: "Public roadmap", description: "Plan", content: "Details", teamIds: ["team-1"] });
 });
 
 test("normalizes direct tracking creation without hidden contract formatting", () => {

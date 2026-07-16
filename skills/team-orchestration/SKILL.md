@@ -19,6 +19,10 @@ Treat the current Git repository and caller cmux workspace as the project. Keep 
 
 When the operator asks to open, file, log, add, or record a Linear bug, issue, or ticket, treat that as an administrative tracking request—not implementation design. Do not create a retrospective contract, call `team_contract_approve`, mention an implementation approval phrase, or ask for approval again. Gather only missing issue content or destination details, resolve canonical IDs with read tools, call `linear_create_issue`, and read the issue back. If the API/schema call fails, correct and retry; authorization is consumed only after successful creation. If an approved pending contract already exists, its creation authorization remains valid across failed calls and `/reload`.
 
+## Linear plan publication
+
+When the operator explicitly asks to publish, translate, sync, put, or move a completed plan into Linear, that instruction authorizes materialization without another contract or implementation phrase. Never call generic `mcp_*` tools. Use pi-linear reads to resolve teams and check projects. If the project does not exist, call `linear_save_project` in create mode only (omit `projectId`) with the planned name/content and read-proven `teamIds`. Create the plan's issues only in the returned project ID, read back the project and issues, summarize identifiers/URLs, and stop. Correct and retry failed calls without reapproval. Do not implement, merge, or deploy.
+
 ## Review and approval
 
 Call `team_contract_draft` only with a complete Feature or Bug contract. Show its full Markdown. `/team-contract open` is an optional explicit Zed review action; never open or focus Zed automatically.
@@ -44,6 +48,7 @@ Approval is stored locally first. If no Linear destination is configured, report
 - For approved issue creation, supply canonical destination identifiers and let orchestration inject the exact approved title and managed description. Never reconstruct hidden markers or request reapproval for persistence formatting.
 - After every write, call `linear_get_issue` and report success only when the requested destination/content/status is confirmed.
 - A direct operator tracking request may call `linear_create_issue` without an implementation contract; fields are restricted and destination IDs must be read-proven.
+- Explicit plan publication may create one project and up to 50 scoped issues in the same turn. Existing project updates and all destructive project operations remain blocked.
 - Approved planned issue creation remains authorized durably until successful persistence, including across failed calls and `/reload`; update/comment operations remain scoped to the active issue.
 - Never delete, archive, mutate unrelated projects/documents, switch workspaces, or use unknown `linear_*` tools.
 - Never expose credentials or route Linear through generic MCP.
