@@ -4,24 +4,36 @@ This repository must not contain credentials, private session transcripts, clien
 
 ## Reporting a vulnerability
 
-Please use GitHub's private security advisory feature for this repository. Do not include active credentials or sensitive session data in a public issue.
+Use GitHub's private security advisory feature. Do not include active credentials or sensitive session data in a public issue.
 
 ## Extension permissions
 
-Pi extensions execute with the permissions of the local user running Pi. Review extension source before installation and use operating-system or container isolation for untrusted work.
+Pi extensions and visible workers execute with the local operator's permissions. Review extension source before installation and use containers or operating-system isolation for untrusted repositories. V2 is a coordination boundary, not a sandbox.
 
-## Orchestration credentials
+## Lead + worker boundaries
 
-Linear authentication is owned by [`@alasano/pi-linear`](https://github.com/alasano/house-of-pi/tree/master/packages/pi-linear). Operators must use `/linear-auth`; the orchestration extension does not copy, print, migrate, or accept Linear credentials. `/linear-settings` and workspace selection also remain operator-controlled. Do not configure a personal key against the hosted Linear MCP endpoint.
+The active package loads `extensions/lead/index.ts`. It does not globally disable Pi's normal read/edit/write/bash tools and does not require contracts. Implementation intent permits an isolated worktree/branch, project changes, validation, commits, normal push, and PR preparation.
 
-The optional `~/.pi/team-orchestration/mcp.json` is only for non-Linear MCP servers. Keep private static headers there with `0600` permissions and never commit the file. Existing files are not exposed or migrated automatically.
+A narrow tool hook protects separate boundaries:
 
-All `linear_*` tool calls are intercepted regardless of which third-party extension registered them. Reads are limited by prefix; approved writes are active-issue scoped; destructive, workspace-switching, unrelated resource mutations, and unknown tools are blocked. Approved issue creation is normalized in the tool hook: unapproved proposed fields are removed, canonical destination IDs are retained, and the approved title/managed description are injected by orchestration. Direct operator administration may update supported fields or create non-destructive relations only within the finite issue set named by the operator; both relation endpoints are checked. Direct operator tracking requests may create one issue without an implementation contract; only read-proven destination IDs plus title/description survive normalization, parallel duplicate calls are blocked, and authorization ends after successful creation. Explicit plan publication may create one project (never update one) and at most 50 issues scoped to its returned ID; generic MCP, existing-project mutation, and destructive project operations remain blocked. A direct operator instruction to mark the active issue done grants only a one-turn `stateId` update using a completed status discovered for that team; it does not authorize unrelated fields or issues.
+- force-push is always blocked;
+- merge, deployment, production/cloud mutation, and destructive commands require an interactive one-command confirmation;
+- destructive Linear operations and workspace switching are blocked;
+- known credential stores, private keys, service-account files, and real `.env` files are blocked;
+- research and review workers are read-only at the Pi tool layer, with obvious mutating shell commands blocked as defense in depth.
 
-## Delivery workers and publication
+Generated worker commands use argv execution except for a private mode-`0700` launch script sent to a known cmux terminal. Values in that script are single-quote escaped. No credential is copied into the script; the interactive Pi process resolves its own configured authentication.
 
-A clear implementation directive authorizes only internal work-order creation and isolated branch/worktree/PR preparation. It does not authorize merge, deployment, production mutation, destructive operations, or unrelated Linear writes; those boundaries do not depend on contract ceremony.
+cmux actions target the caller's explicit workspace, create with `--focus false`, and never call `select-workspace`, `focus-pane`, or `focus-panel`. Workers are live Pi TUIs rather than hidden subprocesses. Worktrees and sessions are retained for operator inspection and are never silently deleted.
 
-Delivery workers run with extension/skill discovery disabled and a trusted guard loaded explicitly. The guard confines file tools to the canonical worktree, validates symlinks, denies sensitive filenames, strips Linear credentials, blocks Linear/MCP access, prevents worker push/merge/deploy commands, and makes reviewers read-only. Private prompts, logs, reviews, checks, and state use `0600` files outside the repository.
+Private task state, assignment prompts, launch scripts, and review packets live under `~/.pi/lead-orchestration/`. Directories use mode `0700`; files use mode `0600` (launch scripts `0700`); writes are atomic.
 
-Before publication, new runs compare validation against the untouched fetched base. New regressions require bounded repair and independent re-review; base-red or environment-blocked checks remain explicit warnings rather than prompting unsafe secret copying or unrelated cleanup. The controller then requires authenticated GitHub metadata with recognized public/private/internal visibility and scans changed files for sensitive names, credential patterns, private absolute paths, file-count limits, and file-size limits. Git and GitHub operations use argv execution without a shell, never force-push, and never invoke merge, deployment, branch deletion, remote deletion, or automatic successful-worktree cleanup. cmux operations target the caller workspace with focus-disabled creation unless the operator explicitly requests a dedicated new window; that placement is stored with the run. Single cmux CLI topology commands are allowed from the CTO session, while compound shell and direct project mutation remain blocked. Surfaces are display-only rather than an orchestration control protocol. Publication scanning rejects the actual local home path, not legitimate production service paths under `/home/<service>`; local-path findings may be repaired only through the guarded implementer plus independent review.
+## Linear
+
+Linear authentication belongs to [`@alasano/pi-linear`](https://github.com/alasano/house-of-pi/tree/master/packages/pi-linear). Operators use `/linear-auth` and `/linear-settings`; this repository does not read, copy, print, or migrate Linear credentials. Do not send a personal key to a generic hosted MCP endpoint.
+
+Routine Linear reads and administration do not require implementation contracts. Destructive tools and agent-driven workspace switching remain blocked by V2.
+
+## Legacy code
+
+`extensions/orchestration/` is retained only for migration history and regression tests. It is not listed in the Pi package manifest and is not activated by `/reload`.

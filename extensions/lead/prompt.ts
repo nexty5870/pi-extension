@@ -1,0 +1,117 @@
+import type { TaskRecord } from "./types.ts";
+
+function section(title: string, body: string | undefined): string {
+  return body?.trim() ? `## ${title}\n\n${body.trim()}\n` : "";
+}
+
+function criteria(task: TaskRecord): string {
+  if (task.brief.acceptanceCriteria.length === 0) return "- Infer concrete completion criteria from the task and report them in your handoff.";
+  return task.brief.acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n");
+}
+
+export function workerPrompt(task: TaskRecord, reviewPacketPath?: string): string {
+  const identity = task.role === "review"
+    ? "You are an independent review worker in a real, visible Pi session."
+    : task.role === "research"
+      ? "You are a research worker in a real, visible Pi session."
+      : "You are an implementation worker in a real, visible Pi session with shell and editing access.";
+  const roleInstructions = task.role === "review"
+    ? [
+        "Review the issue, every acceptance criterion, the exact current diff, and validation evidence.",
+        "Do not modify files. You may run read-only inspection and validation commands.",
+        `Read the review packet at ${reviewPacketPath ?? "the path supplied by the Lead"}; run git diff yourself if its diff is truncated.`,
+        "Before finishing, call lead_worker_report with a verdict, findings, and an acceptance matrix containing evidence for every criterion.",
+      ]
+    : task.role === "research"
+      ? [
+          "Inspect only. Do not modify project files, publish branches, or change external systems.",
+          "Call lead_worker_report with a concise handoff containing findings and exact file references.",
+        ]
+      : [
+          "Implement only the assigned scope in this isolated worktree.",
+          "Use bash, edit, and write normally. Run the relevant validation yourself.",
+          "Commit and push the worker branch and open or update a PR when the work is ready. Never force-push.",
+          "Do not merge, deploy, mutate production, or make unrelated Linear changes.",
+          "Call lead_worker_report when blocked, after validation, when the PR is waiting on CI, and when CI is green.",
+          "If CI fails, inspect it and repair regressions; keep the Lead informed rather than silently stopping.",
+        ];
+
+  return [
+    "# Lead worker assignment",
+    "",
+    identity,
+    "The operator can inspect this terminal and intervene directly. Treat new messages in this session as current operator direction.",
+    "",
+    section("Task", `${task.brief.title}\n\n${task.brief.task}`),
+    section("Issue", task.brief.issue),
+    section("Acceptance criteria", criteria(task)),
+    section("Workspace", [
+      `- Task ID: ${task.id}`,
+      `- Role: ${task.role}`,
+      `- Worktree: ${task.worktreePath}`,
+      task.branchName ? `- Branch: ${task.branchName}` : "",
+      task.baseSha ? `- Review base SHA: ${task.baseSha}` : "",
+      task.parentTaskId ? `- Parent implementation task: ${task.parentTaskId}` : "",
+    ].filter(Boolean).join("\n")),
+    "## Working agreement",
+    "",
+    ...roleInstructions.map((instruction) => `- ${instruction}`),
+    "- Never expose credentials or read private credential stores.",
+    "- Keep the session open when you finish so the operator can inspect or continue it.",
+    "",
+  ].join("\n");
+}
+
+export function reviewPacket(task: TaskRecord, parent: TaskRecord, git: {
+  status: string;
+  diff: string;
+  truncated: boolean;
+  diffHash: string;
+  headSha: string;
+}): string {
+  const acceptance = parent.brief.acceptanceCriteria.length > 0
+    ? parent.brief.acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n")
+    : "- No explicit criteria were supplied; identify and state the criteria you applied.";
+  const checks = parent.checks.length > 0
+    ? parent.checks.map((check) => `- ${check.name}: ${check.status}${check.details ? ` — ${check.details}` : ""}`).join("\n")
+    : "- No validation evidence has been reported yet. Run the relevant checks yourself.";
+  const githubChecks = parent.pullRequest?.checks.length
+    ? parent.pullRequest.checks.map((check) => `- ${check.name}: ${check.status}${check.details ? ` — ${check.details}` : ""}`).join("\n")
+    : undefined;
+  return [
+    `# Review packet: ${parent.brief.title}`,
+    "",
+    `Review task: ${task.id}`,
+    `Implementation task: ${parent.id}`,
+    `Base SHA: ${parent.baseSha ?? "unknown"}`,
+    `Captured HEAD: ${git.headSha}`,
+    `Diff hash: ${git.diffHash}`,
+    "",
+    section("Linear issue / source issue", parent.brief.issue),
+    section("Requested outcome", parent.brief.task),
+    section("Acceptance criteria", acceptance),
+    section("Implementer handoff", parent.handoff ?? parent.summary),
+    section("Validation evidence", checks),
+    section("GitHub check evidence", githubChecks),
+    section("Pull request", parent.pullRequest?.url),
+    section("Git status", git.status || "clean"),
+    "## Exact diff",
+    "",
+    git.truncated
+      ? "> The embedded diff is truncated at 200 KiB. Review it, then run `git diff <base-sha> --` in the worktree for the complete diff."
+      : "> Complete diff captured when this review session was created.",
+    "",
+    "```diff",
+    git.diff || "(no diff)",
+    "```",
+    "",
+  ].join("\n");
+}
+
+export const LEAD_SYSTEM_PROMPT = `You are the persistent Lead for this project. Work conversationally and use your normal Pi tools without contract ceremony or global edit restrictions.
+
+Delegate when a separate context is genuinely useful. Use lead_delegate for implementation, research, and independent review. Every delegated worker is a real visible Pi TUI in the caller's cmux workspace; the operator can inspect and intervene directly. Do not describe a sequential implementer/reviewer pair as a fleet. Multiple independent workers may run concurrently.
+
+For issue-backed work, give workers the actual issue context and acceptance criteria. Before accepting implementation, create an independent review worker so its packet includes the issue, criteria, exact diff, and validation evidence. Use lead_message_worker to steer an existing worker instead of replacing it unnecessarily. Use lead_update_worker only to reconcile state after direct operator intervention or a worker exit. Use lead_refresh_pr to distinguish pending, failed, green, and merged PR states.
+
+Implementation authorizes an isolated branch, commits, normal push, and PR preparation. It never implies merge, deployment, production mutation, force-push, destructive Linear operations, or unrelated changes. Merge and deployment require separate direct operator authorization.`;

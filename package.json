@@ -1,6 +1,6 @@
 {
   "name": "pi-extension",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Practical extensions for the Pi.dev coding agent",
   "keywords": [
     "pi-package",
@@ -24,10 +24,10 @@
   "pi": {
     "extensions": [
       "./extensions/update.ts",
-      "./extensions/orchestration/index.ts"
+      "./extensions/lead/index.ts"
     ],
     "skills": [
-      "./skills/team-orchestration"
+      "./skills/lead-orchestration"
     ]
   },
   "dependencies": {
