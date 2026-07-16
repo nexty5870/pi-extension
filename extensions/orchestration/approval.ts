@@ -87,9 +87,10 @@ export function restoreLinearPlanPublishIntent(userMessages: string[]): boolean 
 
 export function classifyApprovalIntent(text: string): ApprovalIntent {
   const normalized = normalizeApprovalText(text);
-  if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|implement|proceed|continue|ship|mark|complete|close|set|move|update|change)\b/.test(normalized)) return "none";
+  if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|confirm|implement|proceed|continue|ship|mark|complete|close|set|move|update|change)\b/.test(normalized)) return "none";
   if (/^(?:should|shall) (?:we|i)\b/.test(normalized)) return "none";
-  if (/\b(?:approve|approved|accept|accepted)\b/.test(normalized)) return "explicit";
+  if (/\b(?:approve|approved|accept|accepted|confirm|confirmed)\b/.test(normalized)) return "explicit";
+  if (/\b(?:let s|lets) proceed\b/.test(normalized)) return "explicit";
   if (/\b(?:get it done|do it|implement it|start implementation|ship it|make it happen|mark (?:it )?done)\b/.test(normalized)) return "explicit";
   if (/\bgo ahead(?: and (?:implement(?: it|ation)?|get it done|do it|ship it))?\b/.test(normalized)) return "explicit";
   if (EXPLICIT_APPROVALS.some((pattern) => pattern.test(normalized))) return "explicit";

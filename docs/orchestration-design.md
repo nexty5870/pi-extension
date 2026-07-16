@@ -64,11 +64,11 @@ An explicit request to publish/translate/sync a completed plan to Linear grants 
 
 `team_contract_draft` validates a complete draft, renders all Markdown in Pi, writes a private snapshot, and enters `review`. Zed opens only after explicit `/team-contract open`; `/team-contract reload` reparses and validates operator edits.
 
-The input hook normalizes Unicode, case, surrounding whitespace, and punctuation, then recognizes clear acceptance or action intent. `Approve, get it done`, `approved`, `do it`, `ship it`, `go ahead`, `proceed`, and `mark it done` cross the approval gate after a review-ready contract. The operator does not need to separately mention implementation or repeat prescribed wording.
+The input hook normalizes Unicode, case, surrounding whitespace, and punctuation, then recognizes clear acceptance or action intent. `Confirm, let's proceed`, `approve, get it done`, `approved`, `do it`, `ship it`, `go ahead`, `proceed`, and `mark it done` cross the approval gate after a review-ready contract. The operator does not need to separately mention implementation or repeat prescribed wording. Approval is invoked through the agent's `team_contract_approve` tool; `/team-contract approve` does not exist and must never be suggested.
 
 Only genuinely non-actionable acknowledgements such as a bare `ok` or `looks good` remain ambiguous. Negated instructions and deliberative questions such as `should we?` do not approve; direct requests such as `can you mark it done?` do. A direct completion instruction creates a one-turn capability for workflow fields on the exact active Linear issue. The requested `stateId` must come from a completed team status discovered in that turn, and the issue is read back before success is reported. Unrelated fields, issues, creation, destructive tools, and workspace changes remain blocked.
 
-`team_contract_approve` consumes a single-use in-memory capability. It reloads the local Markdown, validates it again, and stores a local approval record before any optional integration call. Local-only approval does not initialize MCP or call Linear.
+`team_contract_approve` consumes a contract-scoped capability. Unconsumed clear approval remains available across agent settlement and is reconstructed from session history after `/reload`; a new contract draft clears it. It reloads the local Markdown, validates it again, and stores a local approval record before any optional integration call. Local-only approval does not initialize MCP or call Linear.
 
 Approval records distinguish:
 
