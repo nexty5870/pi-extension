@@ -7,6 +7,7 @@ const SCOPED_WRITES = new Set([
   "linear_update_issue",
   "linear_create_comment",
   "linear_update_comment",
+  "linear_save_project",
 ]);
 
 export function classifyLinearTool(toolName: string): LinearToolClass {
@@ -95,6 +96,10 @@ export interface LinearPolicyContext {
   allowCreateIssue?: boolean;
   /** One-turn capability created by a direct operator request to open a tracking issue. */
   allowDirectIssueCreate?: boolean;
+  /** One-turn capability created by an explicit request to publish a plan to Linear. */
+  allowPlanProjectCreate?: boolean;
+  allowPlanIssueCreate?: boolean;
+  planProjectIds?: ReadonlySet<string>;
   /** One-turn capability created by a direct operator request such as “mark it done”. */
   allowWorkflowUpdate?: boolean;
   completedStatusIds?: ReadonlySet<string>;
@@ -119,7 +124,24 @@ export function authorizeLinearTool(
     return { allowed: false, reason: `Unknown Linear tool ${toolName} is blocked by default` };
   }
 
-  if (toolName.toLowerCase() === "linear_create_issue" && context.allowDirectIssueCreate) {
+  if (toolName.toLowerCase() === "linear_save_project") {
+    if (!context.allowPlanProjectCreate) {
+      return { allowed: false, reason: "Project creation requires a direct operator request to publish a plan to Linear" };
+    }
+    if (args.projectId !== undefined || args.id !== undefined) {
+      return { allowed: false, reason: "Plan publication may create a project but cannot update an existing project" };
+    }
+    if (typeof args.name !== "string" || !args.name.trim()) return { allowed: false, reason: "Project creation requires a name" };
+    if (!Array.isArray(args.teamIds) || args.teamIds.length === 0 || args.teamIds.some((id) => typeof id !== "string" || !resolvedLinearId(id, context.resourceAliases))) {
+      return { allowed: false, reason: "Project creation requires read-proven canonical teamIds" };
+    }
+    if (!hasOnlyKeys(args, ["name", "description", "content", "teamIds"])) {
+      return { allowed: false, reason: "Project creation contains fields outside plan publication" };
+    }
+    return { allowed: true };
+  }
+
+  if (toolName.toLowerCase() === "linear_create_issue" && (context.allowDirectIssueCreate || context.allowPlanIssueCreate)) {
     const teamId = stringAt(args, ["teamId"]);
     const teamKey = stringAt(args, ["teamKey"]);
     const actualTeam = teamId ?? teamKey;
@@ -127,7 +149,10 @@ export function authorizeLinearTool(
       return { allowed: false, reason: "Direct issue creation requires a teamId/teamKey proven by a pi-linear read in this turn" };
     }
     const projectId = stringAt(args, ["projectId"]);
-    if (projectId && !resolvedLinearId(projectId, context.resourceAliases)) {
+    if (context.allowPlanIssueCreate && (!projectId || !context.planProjectIds?.has(projectId))) {
+      return { allowed: false, reason: "Plan issues must target the project created for this publication" };
+    }
+    if (projectId && !resolvedLinearId(projectId, context.resourceAliases) && !context.planProjectIds?.has(projectId)) {
       return { allowed: false, reason: "Direct issue creation projectId must be proven by a pi-linear read in this turn" };
     }
     if (typeof args.title !== "string" || !args.title.trim()) {

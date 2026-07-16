@@ -44,6 +44,30 @@ function proposedString(proposed: Record<string, unknown>, key: string): string 
  * The extension, not the model, owns approved persistence formatting. Only canonical
  * destination identifiers survive from proposed pi-linear arguments.
  */
+function proposedStrings(proposed: Record<string, unknown>, key: string): string[] | undefined {
+  const direct = proposed[key];
+  if (Array.isArray(direct) && direct.every((item) => typeof item === "string")) return direct.map((item) => item.trim()).filter(Boolean);
+  const input = proposed.input;
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    const nested = (input as Record<string, unknown>)[key];
+    if (Array.isArray(nested) && nested.every((item) => typeof item === "string")) return nested.map((item) => item.trim()).filter(Boolean);
+  }
+  return undefined;
+}
+
+export function normalizeDirectProjectCreateArguments(proposed: Record<string, unknown>): Record<string, unknown> {
+  const name = proposedString(proposed, "name");
+  const description = proposedString(proposed, "description");
+  const content = proposedString(proposed, "content");
+  const teamIds = proposedStrings(proposed, "teamIds");
+  return {
+    ...(name ? { name } : {}),
+    ...(description ? { description } : {}),
+    ...(content ? { content } : {}),
+    ...(teamIds?.length ? { teamIds } : {}),
+  };
+}
+
 export function normalizeDirectIssueCreateArguments(proposed: Record<string, unknown>): Record<string, unknown> {
   const teamId = proposedString(proposed, "teamId");
   const teamKey = proposedString(proposed, "teamKey");
