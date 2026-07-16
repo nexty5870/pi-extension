@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyApprovalIntent, isCompletionDirective, isLinearIssueCreateDirective, isLinearPlanPublishDirective, normalizeApprovalText } from "../extensions/orchestration/approval.ts";
+import { classifyApprovalIntent, isCompletionDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, normalizeApprovalText, restoreLinearPlanPublishIntent } from "../extensions/orchestration/approval.ts";
 
 for (const phrase of [
   "Approve contract and start implementation",
@@ -49,6 +49,9 @@ test("recognizes explicit publication of a completed plan to Linear", () => {
   assert.equal(isLinearPlanPublishDirective("create this project in Linear"), true);
   assert.equal(isLinearPlanPublishDirective("should we publish it to Linear?"), false);
   assert.equal(isLinearPlanPublishDirective("do not sync this plan to Linear"), false);
+  assert.equal(restoreLinearPlanPublishIntent(["create this plan and translate it to Linear", "retry with the canonical IDs"]), true);
+  assert.equal(isLinearPlanPublishCancelDirective("cancel the Linear publication"), true);
+  assert.equal(restoreLinearPlanPublishIntent(["publish the roadmap into Linear", "cancel the Linear publication", "retry"]), false);
 });
 
 test("does not promote vague acknowledgements or negation to approval", () => {
