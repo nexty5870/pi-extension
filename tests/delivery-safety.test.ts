@@ -15,6 +15,9 @@ test("worker guard denies traversal, symlink escape, sensitive paths, shell publ
   await assert.rejects(() => assertContainedPath(root, ".env"), /Sensitive/);
   assert.throws(() => assertWorkerTool("implementer", "linear_get_issue", {}), /Linear/);
   assert.throws(() => assertWorkerTool("implementer", "bash", { command: "git push origin main" }), /restricted/);
+  assert.doesNotThrow(() => assertWorkerTool("implementer", "bash", { command: "pnpm --filter @makeautomation/shared typecheck" }));
+  assert.doesNotThrow(() => assertWorkerTool("implementer", "bash", { command: "pnpm install --frozen-lockfile" }));
+  assert.throws(() => assertWorkerTool("implementer", "bash", { command: "pnpm publish" }), /restricted/);
   assert.throws(() => assertWorkerTool("reviewer", "edit", {}), /cannot modify/);
 });
 test("public scanner catches credentials, private paths, and limits", async () => {

@@ -70,6 +70,15 @@ export function isLinearIssueAdminDirective(text: string): boolean {
   return !negated && !deliberative && action;
 }
 
+export function isImplementationStartDirective(text: string): boolean {
+  const normalized = normalizeApprovalText(text);
+  const negated = /\b(?:do not|don t|never|not)\b.*\b(?:start|begin|launch|implement|proceed|continue)\b/.test(normalized);
+  const deliberative = /^(?:should|shall) (?:we|i)\b/.test(normalized);
+  const concrete = /\b(?:start|begin|launch|kick off)\b.{0,80}\b(?:implementation|delivery|work)\b/.test(normalized) || /\bimplement(?: it| this| the)?\b/.test(normalized);
+  const continuation = /^(?:yes |confirm |confirmed |please )?(?:let s |lets )?(?:proceed|continue|do it|get it done|make it happen)(?: with (?:it|implementation|delivery|the contract))?\b/.test(normalized);
+  return !negated && !deliberative && (concrete || continuation);
+}
+
 export function isLinearPlanPublishCancelDirective(text: string): boolean {
   const normalized = normalizeApprovalText(text);
   return /\b(?:cancel|stop|abort|forget)\b.{0,80}\b(?:linear|publish|publication|sync|plan)\b/.test(normalized) ||
@@ -80,7 +89,7 @@ export function restoreLinearPlanPublishIntent(userMessages: string[]): boolean 
   let armed = false;
   for (const message of userMessages) {
     if (isLinearPlanPublishDirective(message)) armed = true;
-    if (isLinearPlanPublishCancelDirective(message)) armed = false;
+    if (isLinearPlanPublishCancelDirective(message) || isImplementationStartDirective(message)) armed = false;
   }
   return armed;
 }

@@ -4,11 +4,13 @@ import { checked } from "./command.ts";
 export type CiState = "pending" | "success" | "failure" | "cancelled" | "timed-out" | "none";
 export class GitHubAdapter {
   constructor(private readonly runner: CommandRunner) {}
-  async assertPublic(root: string): Promise<string> {
+  async assertPublishable(root: string): Promise<{ nameWithOwner: string; visibility: "PUBLIC" | "PRIVATE" | "INTERNAL" }> {
     const raw = await checked(this.runner, "gh", ["repo", "view", "--json", "visibility,nameWithOwner"], root);
     const value = JSON.parse(raw) as { visibility?: string; nameWithOwner?: string };
-    if (value.visibility !== "PUBLIC" || !value.nameWithOwner) throw new Error("Delivery publication requires an acknowledged public GitHub repository");
-    return value.nameWithOwner;
+    if (!value.nameWithOwner || !["PUBLIC", "PRIVATE", "INTERNAL"].includes(value.visibility ?? "")) {
+      throw new Error("Delivery requires an authenticated GitHub repository with recognized visibility");
+    }
+    return value as { nameWithOwner: string; visibility: "PUBLIC" | "PRIVATE" | "INTERNAL" };
   }
   async reconcilePr(root: string, branch: string, base: string, title: string, body: string): Promise<string> {
     const existingRaw = await checked(this.runner, "gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "url,title,body,baseRefName", "--limit", "2"], root);

@@ -4,7 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, restoreLinearPlanPublishIntent, type ApprovalIntent } from "./approval.ts";
+import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isImplementationStartDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, restoreLinearPlanPublishIntent, type ApprovalIntent } from "./approval.ts";
 import {
   contractFromInput,
   contractHash,
@@ -128,8 +128,10 @@ function restoredIssueAdminRefs(ctx: ExtensionContext): Set<string> {
     if (entry.type !== "message") continue;
     if (entry.message.role === "assistant") {
       latestAssistant = entry.message.content.filter((part) => part.type === "text").map((part) => part.type === "text" ? part.text : "").join("\n");
-    } else if (entry.message.role === "user" && isLinearIssueAdminDirective(messageContentText(entry.message.content))) {
-      authorized = new Set([...extractLinearIssueIdentifiers(messageContentText(entry.message.content)), ...extractLinearIssueIdentifiers(latestAssistant)]);
+    } else if (entry.message.role === "user") {
+      const text = messageContentText(entry.message.content);
+      if (isImplementationStartDirective(text)) authorized = new Set<string>();
+      else if (isLinearIssueAdminDirective(text)) authorized = new Set([...extractLinearIssueIdentifiers(text), ...extractLinearIssueIdentifiers(latestAssistant)]);
     }
   }
   return authorized;
@@ -314,8 +316,9 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     if (initiative?.status !== "review") approvalArmed = false;
     else if (approvalIntent === "explicit") approvalArmed = true;
     else if (approvalIntent === "ambiguous") approvalArmed = false;
+    const startsImplementation = isImplementationStartDirective(event.text);
     const startsPlanPublication = isLinearPlanPublishDirective(event.text);
-    const cancelsPlanPublication = isLinearPlanPublishCancelDirective(event.text);
+    const cancelsPlanPublication = isLinearPlanPublishCancelDirective(event.text) || startsImplementation;
     if (startsPlanPublication && !operatorPlanPublishArmed) {
       linearPlanIssueCount = 0;
       linearPlanProjectIds = new Set<string>();
@@ -327,6 +330,10 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
       linearPlanProjectIds = new Set<string>();
     }
     operatorIssueCreateArmed = !operatorPlanPublishArmed && isLinearIssueCreateDirective(event.text);
+    if (startsImplementation) {
+      operatorIssueAdminArmed = false;
+      operatorIssueAdminRefs = new Set<string>();
+    }
     if (isLinearIssueAdminDirective(event.text)) {
       const refs = [...extractLinearIssueIdentifiers(event.text), ...extractLinearIssueIdentifiers(latestAssistantText(ctx))];
       if (refs.length) { operatorIssueAdminArmed = true; operatorIssueAdminRefs = new Set(refs); }
@@ -491,7 +498,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     const guidance = `Pi team orchestration is available in this repository.
 For a new feature or bug, work conversationally and ask one decision question at a time. Keep drafts local.
 When the contract is complete, call team_contract_draft with the full standard contract. Its complete Markdown must be shown to the operator.
-Call team_contract_approve after any clear acceptance or action directive, including “confirm, let's proceed”, “approve, get it done”, “do it”, “ship it”, or “mark it done”. team_contract_approve is a tool, not a /team-contract subcommand: /team-contract approve does not exist and must never be suggested. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
+Call team_contract_approve after any clear acceptance or action directive, including “confirm, let's proceed”, “approve, get it done”, “do it”, “ship it”, or “mark it done”. team_contract_approve is a tool, not a /team-contract subcommand: /team-contract approve does not exist and must never be suggested. When that directive also asks to start/proceed with implementation, complete required approved Linear persistence and call team_delivery_start yourself; do not require the operator to run /team-delivery start. team_delivery_start also retries a failed run for the same approval. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
 When invoking pi-linear tools, treat human names and canonical IDs as different representations of the same approved destination, not as scope changes. Before a write that needs teamId, teamKey, projectId, stateId, or another canonical reference, call the relevant linear_list_* or linear_get_* tool and use the exact schema field and canonical value returned. Never place a project name in projectId. A read-proven name-to-ID substitution does not change contract scope, must not increment the contract version, and must not trigger reapproval. For approved issue creation, provide only the canonical destination identifiers; orchestration injects the exact approved title and managed description, so never reconstruct hidden markers or ask for reapproval because of formatting. After every Linear write, read the issue back and report success only after verifying the requested result.
 ${operatorIssueAdminArmed
       ? `The operator explicitly authorized Linear administration for these issues: ${[...operatorIssueAdminRefs].join(", ")}. This is not implementation work and requires no contract or approval. Use pi-linear reads to resolve issue UUIDs, labels, statuses, users, and projects. Apply only the requested priority/label/assignment/scheduling fields with linear_update_issue and only requested blocks/duplicate/related/similar links with linear_create_issue_relation. Every target and both ends of every relation must be in the authorized issue set. Read the changed issues and relations back, summarize results, and stop. Do not ask the operator to make these changes manually.`
@@ -700,6 +707,46 @@ ${operatorIssueAdminArmed
     return { controller, deliveryStore };
   };
 
+  const deliveryOutcome = (state: DeliveryState): string => {
+    const destination = state.prUrl ? `: ${state.prUrl}` : "";
+    const failure = state.failure ? ` — ${state.failure}` : "";
+    return `Delivery ${state.phase}${destination}${failure}`;
+  };
+
+  const launchDelivery = async (ctx: ExtensionContext, resume?: DeliveryState): Promise<string> => {
+    await verifyApprovedContractFile();
+    const { controller, deliveryStore } = deliveryController();
+    delivery = delivery ?? await deliveryStore.latest();
+    const sameApproval = delivery?.contractHash === initiative?.approved?.contentHash;
+    let existing = resume;
+    if (!existing && sameApproval) {
+      if (delivery?.phase === "completed") return deliveryOutcome(delivery);
+      if (["failed", "aborted", "action-required"].includes(delivery!.phase)) existing = delivery;
+      else throw new Error(`Delivery is already ${delivery!.phase}`);
+    }
+    if (!existing && delivery && !["completed", "failed", "aborted", "action-required"].includes(delivery.phase)) throw new Error("A delivery run already exists");
+    const abort = new AbortController(); activeDeliveryAbort = abort;
+    void controller.run(initiative!, project!, existing, abort.signal).then((state) => {
+      delivery = state;
+      if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined;
+      ctx.ui.notify(deliveryOutcome(state), state.phase === "completed" ? "info" : "warning");
+    }).catch((error) => {
+      if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined;
+      ctx.ui.notify(`Delivery launcher failed: ${(error as Error).message}`, "error");
+    });
+    return existing ? "Delivery resume started; progress is visible in the Team pane." : "Delivery started; progress is visible in the Team pane.";
+  };
+
+  pi.registerTool({
+    name: "team_delivery_start",
+    label: "Start Team Delivery",
+    description: "Start or retry the approved isolated implementation workflow after a clear operator implementation directive",
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _update, ctx) {
+      return textResult(await launchDelivery(ctx));
+    },
+  });
+
   pi.registerCommand("team-delivery", {
     description: "Manage delivery: /team-delivery [start|show|resume|abort|cleanup]",
     getArgumentCompletions: (prefix) => {
@@ -715,25 +762,12 @@ ${operatorIssueAdminArmed
         return;
       }
       if (action === "start") {
-        await verifyApprovedContractFile();
-        if (delivery?.contractHash === initiative?.approved?.contentHash) throw new Error("This approval already has a delivery run; use /team-delivery resume");
-        if (delivery && !["completed", "failed", "aborted"].includes(delivery.phase)) throw new Error("A delivery run already exists");
-        const abort = new AbortController(); activeDeliveryAbort = abort;
-        void controller.run(initiative!, project!, undefined, abort.signal).then((state) => {
-          delivery = state; if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined;
-          ctx.ui.notify(`Delivery ${state.phase}${state.prUrl ? `: ${state.prUrl}` : ""}`, state.phase === "completed" ? "info" : "warning");
-        }).catch((error) => { if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined; ctx.ui.notify(`Delivery could not start: ${(error as Error).message}`, "error"); });
-        ctx.ui.notify("Delivery started; use /team-delivery show or abort", "info");
+        ctx.ui.notify(await launchDelivery(ctx), "info");
         return;
       }
       if (!delivery) throw new Error("No delivery run");
       if (action === "resume") {
-        const abort = new AbortController(); activeDeliveryAbort = abort;
-        void controller.run(initiative!, project!, delivery, abort.signal).then((state) => {
-          delivery = state; if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined;
-          ctx.ui.notify(`Delivery ${state.phase}`, state.phase === "completed" ? "info" : "warning");
-        }).catch((error) => { if (activeDeliveryAbort === abort) activeDeliveryAbort = undefined; ctx.ui.notify(`Delivery could not resume: ${(error as Error).message}`, "error"); });
-        ctx.ui.notify("Delivery resume started", "info");
+        ctx.ui.notify(await launchDelivery(ctx, delivery), "info");
         return;
       }
       if (action === "abort") {

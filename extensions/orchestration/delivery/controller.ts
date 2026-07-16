@@ -50,7 +50,7 @@ export class DeliveryController {
 
   private async execute(state: DeliveryState, contract: FeatureOrBugContract, project: ProjectContext, signal?: AbortSignal): Promise<void> {
     if (contractHash(contract) !== state.contractHash) throw new Error("Contract drift detected before delivery");
-    await this.deps.github.assertPublic(state.projectRoot);
+    await this.deps.github.assertPublishable(state.projectRoot);
     const hadTopology = Boolean(state.cmux?.implementerSurfaceId && state.cmux?.reviewerSurfaceId);
     state.cmux = await this.deps.cmux.ensureTopology(state.cmux);
     await this.save(state, "preflight");

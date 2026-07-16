@@ -13,14 +13,20 @@ async function fixture() {
   await checked(runner, "git", ["commit", "--allow-empty", "-m", "initial"], repo); await checked(runner, "git", ["remote", "add", "origin", remote], repo); await checked(runner, "git", ["push", "-u", "origin", "main"], repo);
   return { root, repo, runner };
 }
-test("git adapter gates clean synchronized base and creates isolated worktree", async () => {
+test("git adapter uses the fetched origin base and creates an isolated worktree", async () => {
   const { root, repo, runner } = await fixture(); const git = new GitAdapter(runner);
   const metadata = { baseBranch: "main", branchName: "feat/test", commitMessage: "test", prTitle: "test", prBody: "test", checks: [["true"]] };
   const { baseSha } = await git.preflight(repo, metadata); const worktree = await git.createWorktree(repo, join(root, "run"), metadata.branchName, baseSha);
   assert.notEqual(worktree, repo); assert.equal(await checked(runner, "git", ["branch", "--show-current"], worktree), "feat/test");
   await assert.rejects(() => git.preflight(repo, metadata), /Branch already exists/);
 });
-test("git adapter refuses dirty base", async () => {
-  const { repo, runner } = await fixture(); await import("node:fs/promises").then(({ writeFile }) => writeFile(join(repo, "dirty"), "x"));
-  await assert.rejects(() => new GitAdapter(runner).preflight(repo, { baseBranch: "main", branchName: "feat/x", commitMessage: "x", prTitle: "x", prBody: "x", checks: [["true"]] }), /dirty/);
+test("git adapter isolates delivery from a dirty, outdated caller checkout", async () => {
+  const { repo, runner } = await fixture();
+  await checked(runner, "git", ["commit", "--allow-empty", "-m", "remote base"], repo);
+  await checked(runner, "git", ["push", "origin", "main"], repo);
+  const remoteSha = await checked(runner, "git", ["rev-parse", "origin/main"], repo);
+  await checked(runner, "git", ["reset", "--hard", "HEAD~1"], repo);
+  await import("node:fs/promises").then(({ writeFile }) => writeFile(join(repo, "dirty"), "x"));
+  const result = await new GitAdapter(runner).preflight(repo, { baseBranch: "main", branchName: "feat/x", commitMessage: "x", prTitle: "x", prBody: "x", checks: [["true"]] });
+  assert.equal(result.baseSha, remoteSha);
 });

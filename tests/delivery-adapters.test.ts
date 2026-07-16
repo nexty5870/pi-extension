@@ -18,15 +18,18 @@ test("cmux topology targets exact caller workspace without focus/select commands
   assert.ok(args.every((argv) => argv.includes("workspace:w1"))); assert.ok(args.filter((argv) => argv[0] === "new-surface").every((argv) => argv.includes("false")));
   const before = runner.calls.length; await cmux.ensureTopology(topology); assert.equal(runner.calls.length, before);
 });
-test("GitHub adapter requires public visibility and reconciles exact existing PR", async () => {
+test("GitHub adapter accepts recognized repository visibility and reconciles exact existing PR", async () => {
   const runner = new FakeRunner(); runner.queue.push({ stdout: JSON.stringify({ visibility: "PUBLIC", nameWithOwner: "example/repo" }) });
-  const github = new GitHubAdapter(runner); assert.equal(await github.assertPublic("/tmp/example"), "example/repo");
+  const github = new GitHubAdapter(runner); assert.deepEqual(await github.assertPublishable("/tmp/example"), { nameWithOwner: "example/repo", visibility: "PUBLIC" });
   runner.queue.push({ stdout: JSON.stringify([{ url: "https://example.invalid/pr/1", title: "Title", body: "Body", baseRefName: "main" }]) });
   assert.equal(await github.reconcilePr("/tmp/example", "feat/x", "main", "Title", "Body"), "https://example.invalid/pr/1");
   assert.ok(runner.calls.every((call) => !call.args.includes("merge")));
 });
-test("GitHub adapter fails closed for private repositories and mismatched PRs", async () => {
+test("GitHub adapter supports private repositories and fails closed for unknown visibility or mismatched PRs", async () => {
   const runner = new FakeRunner(); const github = new GitHubAdapter(runner);
-  runner.queue.push({ stdout: JSON.stringify({ visibility: "PRIVATE", nameWithOwner: "example/repo" }) }); await assert.rejects(() => github.assertPublic("/tmp"), /public/);
+  runner.queue.push({ stdout: JSON.stringify({ visibility: "PRIVATE", nameWithOwner: "example/repo" }) });
+  assert.deepEqual(await github.assertPublishable("/tmp"), { nameWithOwner: "example/repo", visibility: "PRIVATE" });
+  runner.queue.push({ stdout: JSON.stringify({ visibility: "UNKNOWN", nameWithOwner: "example/repo" }) });
+  await assert.rejects(() => github.assertPublishable("/tmp"), /recognized visibility/);
   runner.queue.push({ stdout: JSON.stringify([{ url: "u", title: "Other", body: "Body", baseRefName: "main" }]) }); await assert.rejects(() => github.reconcilePr("/tmp", "feat/x", "main", "Title", "Body"), /does not match/);
 });

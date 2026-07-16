@@ -49,8 +49,12 @@ export function assertWorkerTool(role: "implementer" | "reviewer", toolName: str
   if (toolName === "bash") {
     const command = String(input.command ?? "").trim();
     if (/[;&|`$<>\n\r]/.test(command) || /(?:^|\s)(?:cd|pushd|popd)\s|(?:^|\s)(?:\/|\.\.\/)/.test(command)) throw new Error("Worker shell syntax can escape the worktree");
-    if (!/^(?:git\s+(?:status|diff|show)(?:\s|$)|npm\s+(?:test|run\s+[A-Za-z0-9:._-]+)(?:\s+--(?:\s+.*)?)?$)/.test(command)) {
-      throw new Error(`${role} shell is restricted to read-only Git inspection and npm validation`);
+    const gitInspection = /^git\s+(?:status|diff|show)(?:\s|$)/.test(command);
+    const npmValidation = /^npm\s+(?:test|run\s+[A-Za-z0-9:._-]+)(?:\s+--(?:\s+.*)?)?$/.test(command);
+    const pnpmValidation = /^pnpm\s+(?:(?:test|lint|typecheck|build)|run\s+[A-Za-z0-9:._-]+|--filter\s+[@A-Za-z0-9/._-]+\s+(?:test|lint|typecheck|build))(?:\s+--(?:\s+.*)?)?$/.test(command);
+    const pnpmInstall = /^pnpm\s+install\s+--frozen-lockfile$/.test(command);
+    if (!gitInspection && !npmValidation && !pnpmValidation && !pnpmInstall) {
+      throw new Error(`${role} shell is restricted to read-only Git inspection and npm/pnpm validation`);
     }
   }
   if (role === "reviewer" && ["write", "edit"].includes(toolName)) throw new Error("Reviewer cannot modify files");
