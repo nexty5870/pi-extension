@@ -89,7 +89,7 @@ The next vertical slice turns a fresh approved, hash-matching contract into an e
 
 The cmux design uses the caller workspace as an immutable anchor: one right-side Team pane, two focus-disabled role surfaces, and coalesced status/progress/flash updates. Private logs are display material only; worker control remains process/state based.
 
-Independent review is bound to the exact diff hash. Approved argv checks and `git diff --check` run after review; any check mutation consumes another review pass. Publication is gated by a sensitive-content scan and public repository visibility, then ends at a PR/CI operator action without merge or deployment.
+Independent review is bound to the exact diff hash. Approved argv checks and `git diff --check` run after review; any check mutation consumes another review pass. Publication is gated by a sensitive-content scan and recognized GitHub repository visibility, then ends at a PR/CI operator action without merge or deployment.
 
 The footer and overview now share delivery state. Context thresholds are visual only, preserving Pi's compaction behavior and the default model/Git/status information.
 

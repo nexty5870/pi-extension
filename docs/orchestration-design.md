@@ -139,7 +139,7 @@ State is partitioned by stable Git-root project ID and initiative ID. Atomic fil
 
 ## Delivery-worker milestone
 
-Deliverable contracts add hash-covered metadata for the base branch, work branch, commit message, PR title/body, and validation argv arrays. `/team-delivery start` requires a current approval hash, completed optional Linear persistence, a clean synchronized base, a public GitHub repository, and authoritative caller cmux IDs.
+Deliverable contracts add hash-covered metadata for the base branch, work branch, commit message, PR title/body, and validation argv arrays. Natural implementation directives call `team_delivery_start`; `/team-delivery start` remains an operator shortcut. Start requires a current approval hash, completed optional Linear persistence, a freshly fetched `origin/<approved-base>` used in an isolated worktree regardless of caller checkout dirt/divergence, an authenticated GitHub repository with recognized public/private/internal visibility, and authoritative caller cmux IDs. Repeating start for the same failed approval resumes its durable run.
 
 The durable phases are preflight, worktree creation, implementation, review, checks, commit, push, PR reconciliation, bounded CI observation, and operator action. State, logs, prompts, reviews, checks, and usage are atomically stored with `0600` permissions under an initiative-specific delivery run. Exclusive locks prevent concurrent execution. Resume reconciles immutable base/worktree/commit/push/PR identities and fails closed on mismatches.
 
@@ -147,7 +147,7 @@ One implementer and one reviewer run as isolated Pi JSON subprocesses. Discovere
 
 Approved checks execute as argv without a shell, followed by `git diff --check`. A check-mutated diff requires another independent review. The final reviewed hash must equal the publication diff. A public-safety scan checks changed paths and content before staging.
 
-Git publication never force-pushes. GitHub publication requires public visibility, reconciles at most one exact PR, observes CI to a bounded terminal state, and stops with an operator action. Merge, deployment, branch/remote deletion, and automatic successful-worktree removal do not exist in the controller.
+Git publication never force-pushes. GitHub publication preserves the target repository's recognized visibility, reconciles at most one exact PR, observes CI to a bounded terminal state, and stops with an operator action. Merge, deployment, branch/remote deletion, and automatic successful-worktree removal do not exist in the controller.
 
 cmux topology is one right-side Team pane with implementer/reviewer terminal surfaces created using the exact caller workspace and `--focus false`. State remains the control protocol; cmux only displays/coalesces status, progress, and flashes.
 

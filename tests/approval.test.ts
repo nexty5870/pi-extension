@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, normalizeApprovalText, restoreLinearPlanPublishIntent } from "../extensions/orchestration/approval.ts";
+import { classifyApprovalIntent, extractLinearIssueIdentifiers, isCompletionDirective, isImplementationStartDirective, isLinearIssueAdminDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, normalizeApprovalText, restoreLinearPlanPublishIntent } from "../extensions/orchestration/approval.ts";
 
 for (const phrase of [
   "Approve contract and start implementation",
@@ -23,6 +23,14 @@ for (const phrase of [
 
 test("normalizes case, surrounding whitespace, and punctuation", () => {
   assert.equal(normalizeApprovalText("  Approved, IMPLEMENT! "), "approved implement");
+});
+
+test("recognizes natural implementation start directives", () => {
+  assert.equal(isImplementationStartDirective("ok lets start the implementation then"), true);
+  assert.equal(isImplementationStartDirective("confirm lets proceed"), true);
+  assert.equal(isImplementationStartDirective("retry"), false);
+  assert.equal(isImplementationStartDirective("should we start implementation?"), false);
+  assert.equal(isImplementationStartDirective("do not start implementation"), false);
 });
 
 test("accepts completion directives without magic wording", () => {
@@ -53,6 +61,7 @@ test("recognizes explicit publication of a completed plan to Linear", () => {
   assert.equal(isLinearPlanPublishDirective("should we publish it to Linear?"), false);
   assert.equal(isLinearPlanPublishDirective("do not sync this plan to Linear"), false);
   assert.equal(restoreLinearPlanPublishIntent(["create this plan and translate it to Linear", "retry with the canonical IDs"]), true);
+  assert.equal(restoreLinearPlanPublishIntent(["publish this plan into Linear", "ok lets start the implementation then"]), false);
   assert.equal(isLinearPlanPublishCancelDirective("cancel the Linear publication"), true);
   assert.equal(restoreLinearPlanPublishIntent(["publish the roadmap into Linear", "cancel the Linear publication", "retry"]), false);
 });

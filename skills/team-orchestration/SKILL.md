@@ -61,7 +61,7 @@ Approval is stored locally first. If no Linear destination is configured, report
 
 ## Delivery
 
-A freshly approved contract with complete delivery metadata may start only through explicit `/team-delivery start`. Confirm that the current contract hash still matches approval, optional Linear persistence is complete, and the Git/GitHub/cmux preflight is clean. Delivery uses one isolated implementer, one independent reviewer, at most three review passes, approved argv checks, publication scanning, and durable recovery.
+A freshly approved contract with complete delivery metadata starts through `team_delivery_start` when the operator clearly directs implementation; do not make them run a slash command after they already said to proceed. `/team-delivery start` remains an optional operator shortcut and idempotently resumes a failed run for the same approval. Confirm that the current contract hash still matches approval, optional Linear persistence is complete, and the Git/GitHub/cmux preflight succeeds. Delivery uses freshly fetched `origin/<approved-base>` in its isolated worktree; do not block on or mutate a dirty/behind caller checkout. Delivery uses one isolated implementer, one independent reviewer, at most three review passes, approved argv checks, publication scanning, and durable recovery.
 
 Use `/team-delivery show` for inspection, `resume` for idempotent reconciliation, `abort` to stop and retain diagnostics, and explicitly confirmed `cleanup` only for failed/aborted private state. Never infer permission to start delivery from contract approval alone.
 

@@ -9,16 +9,13 @@ export class GitAdapter {
   private git(cwd: string, args: string[], timeout = 60_000) { return checked(this.runner, "git", args, cwd, timeout); }
 
   async preflight(root: string, metadata: DeliveryMetadata): Promise<{ baseSha: string; remote: string }> {
-    if (await this.git(root, ["status", "--porcelain"])) throw new Error("Repository working tree is dirty");
     const remote = await this.git(root, ["remote", "get-url", "origin"]);
     if (!remote) throw new Error("origin remote is missing");
     await this.git(root, ["fetch", "--prune", "origin", metadata.baseBranch], 120_000);
-    const local = await this.git(root, ["rev-parse", metadata.baseBranch]);
     const upstream = await this.git(root, ["rev-parse", `origin/${metadata.baseBranch}`]);
-    if (local !== upstream) throw new Error("Base branch is divergent from origin");
     const branch = await this.runner.run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${metadata.branchName}`], { cwd: root });
     if (branch.exitCode === 0) throw new Error(`Branch already exists: ${metadata.branchName}`);
-    return { baseSha: local, remote };
+    return { baseSha: upstream, remote };
   }
 
   async createWorktree(root: string, runDir: string, branch: string, baseSha: string): Promise<string> {
