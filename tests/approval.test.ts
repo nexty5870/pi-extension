@@ -12,6 +12,9 @@ for (const phrase of [
   "do it",
   "make it happen",
   "yes, proceed with it",
+  "confirm lets proceed",
+  "I confirm",
+  "let's proceed",
 ]) {
   test(`accepts explicit approval: ${phrase.trim()}`, () => {
     assert.equal(classifyApprovalIntent(phrase), "explicit");
@@ -67,6 +70,7 @@ test("does not promote vague acknowledgements or negation to approval", () => {
   assert.equal(classifyApprovalIntent("looks good."), "ambiguous");
   assert.equal(classifyApprovalIntent("thanks"), "none");
   assert.equal(classifyApprovalIntent("do not approve this"), "none");
+  assert.equal(classifyApprovalIntent("do not confirm this"), "none");
   assert.equal(classifyApprovalIntent("I do not want you to approve this"), "none");
   assert.equal(classifyApprovalIntent("can you approve and get it done?"), "explicit");
   assert.equal(classifyApprovalIntent("should we get it done?"), "none");

@@ -31,15 +31,16 @@ When the operator explicitly asks to publish, translate, sync, put, or move a co
 
 Call `team_contract_draft` only with a complete Feature or Bug contract. Show its full Markdown. `/team-contract open` is an optional explicit Zed review action; never open or focus Zed automatically.
 
-After a review-ready contract, call `team_contract_approve` whenever the operator clearly accepts or directs action. Do not require them to mention both the contract and implementation, and never make them repeat clear intent. Examples include:
+After a review-ready contract, call `team_contract_approve` whenever the operator clearly accepts or directs action. Do not require them to mention both the contract and implementation, and never make them repeat clear intent. `team_contract_approve` is an agent tool; `/team-contract approve` is not a valid command and must never be suggested. Examples include:
 
 - “Approve, get it done”
 - “do it”
 - “ship it”
 - “go ahead”
 - “mark it done”
+- “confirm, let's proceed”
 
-Only a genuinely non-actionable acknowledgement such as a bare “ok” or “looks good” is ambiguous. Ask once in that case. A direct request to mark an existing active issue done is an operator workflow instruction, not a reason to invent a retrospective implementation contract. Resolve the team's completed status, update only the active issue's `stateId`, read the issue back, and report success only after the completed status is confirmed.
+Only a genuinely non-actionable acknowledgement such as a bare “ok” or “looks good” is ambiguous. Ask once in that case. Unconsumed explicit approval remains valid through a retry or `/reload`; do not ask the operator to repeat it. A direct request to mark an existing active issue done is an operator workflow instruction, not a reason to invent a retrospective implementation contract. Resolve the team's completed status, update only the active issue's `stateId`, read the issue back, and report success only after the completed status is confirmed.
 
 Approval is stored locally first. If no Linear destination is configured, report exactly: **GitHub/docs-only; no Linear mutation.** If a destination is configured, use the exact pi-linear persistence plan returned by `team_contract_approve`.
 

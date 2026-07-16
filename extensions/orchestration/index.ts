@@ -104,6 +104,23 @@ function sessionUserMessages(ctx: ExtensionContext): string[] {
   return messages;
 }
 
+function restoreContractApprovalIntent(ctx: ExtensionContext): boolean {
+  let contractPresented = false;
+  let armed = false;
+  for (const entry of ctx.sessionManager.getBranch()) {
+    if (entry.type !== "message") continue;
+    if (entry.message.role === "assistant" && entry.message.content.some((part) => part.type === "toolCall" && part.name === "team_contract_draft")) {
+      contractPresented = true;
+      armed = false;
+    } else if (entry.message.role === "user" && contractPresented) {
+      const intent = classifyApprovalIntent(messageContentText(entry.message.content));
+      if (intent === "explicit") armed = true;
+      else if (intent === "ambiguous") armed = false;
+    }
+  }
+  return armed;
+}
+
 function restoredIssueAdminRefs(ctx: ExtensionContext): Set<string> {
   let latestAssistant = "";
   let authorized = new Set<string>();
@@ -233,8 +250,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     operatorPlanPublishArmed = restoreLinearPlanPublishIntent(sessionUserMessages(ctx));
     operatorIssueAdminRefs = restoredIssueAdminRefs(ctx);
     operatorIssueAdminArmed = operatorIssueAdminRefs.size > 0;
-    approvalArmed = false;
-    approvalIntent = "none";
+    approvalArmed = initiative?.status === "review" && restoreContractApprovalIntent(ctx);
+    approvalIntent = approvalArmed ? "explicit" : "none";
     operatorIssueCreateArmed = false;
     linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
@@ -273,8 +290,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     uiSnapshot.initiativeState = initiative?.status;
     uiSnapshot.delivery = delivery;
     requestFooterRender?.();
-    approvalArmed = false;
-    approvalIntent = "none";
+    approvalArmed = initiative?.status === "review" && restoreContractApprovalIntent(ctx);
+    approvalIntent = approvalArmed ? "explicit" : "none";
     operatorIssueCreateArmed = false;
     linearCreateInFlight = false;
     operatorWorkflowUpdateArmed = false;
@@ -294,7 +311,9 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
 
   pi.on("input", (event, ctx) => {
     approvalIntent = classifyApprovalIntent(event.text);
-    approvalArmed = approvalIntent === "explicit" && initiative?.status === "review";
+    if (initiative?.status !== "review") approvalArmed = false;
+    else if (approvalIntent === "explicit") approvalArmed = true;
+    else if (approvalIntent === "ambiguous") approvalArmed = false;
     const startsPlanPublication = isLinearPlanPublishDirective(event.text);
     const cancelsPlanPublication = isLinearPlanPublishCancelDirective(event.text);
     if (startsPlanPublication && !operatorPlanPublishArmed) {
@@ -456,8 +475,6 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", () => {
-    approvalArmed = false;
-    approvalIntent = "none";
     operatorIssueCreateArmed = false;
     linearCreateInFlight = false;
     linearProjectInFlight = false;
@@ -474,7 +491,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     const guidance = `Pi team orchestration is available in this repository.
 For a new feature or bug, work conversationally and ask one decision question at a time. Keep drafts local.
 When the contract is complete, call team_contract_draft with the full standard contract. Its complete Markdown must be shown to the operator.
-Call team_contract_approve after any clear acceptance or action directive, including “approve, get it done”, “do it”, “ship it”, or “mark it done”. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
+Call team_contract_approve after any clear acceptance or action directive, including “confirm, let's proceed”, “approve, get it done”, “do it”, “ship it”, or “mark it done”. team_contract_approve is a tool, not a /team-contract subcommand: /team-contract approve does not exist and must never be suggested. Do not demand a specific phrase or make the operator repeat clear intent. Only ask when the latest acknowledgement is genuinely ambiguous${approvalIntent === "ambiguous" ? " (as it is now)" : ""}.
 When invoking pi-linear tools, treat human names and canonical IDs as different representations of the same approved destination, not as scope changes. Before a write that needs teamId, teamKey, projectId, stateId, or another canonical reference, call the relevant linear_list_* or linear_get_* tool and use the exact schema field and canonical value returned. Never place a project name in projectId. A read-proven name-to-ID substitution does not change contract scope, must not increment the contract version, and must not trigger reapproval. For approved issue creation, provide only the canonical destination identifiers; orchestration injects the exact approved title and managed description, so never reconstruct hidden markers or ask for reapproval because of formatting. After every Linear write, read the issue back and report success only after verifying the requested result.
 ${operatorIssueAdminArmed
       ? `The operator explicitly authorized Linear administration for these issues: ${[...operatorIssueAdminRefs].join(", ")}. This is not implementation work and requires no contract or approval. Use pi-linear reads to resolve issue UUIDs, labels, statuses, users, and projects. Apply only the requested priority/label/assignment/scheduling fields with linear_update_issue and only requested blocks/duplicate/related/similar links with linear_create_issue_relation. Every target and both ends of every relation must be in the authorized issue set. Read the changed issues and relations back, summarize results, and stop. Do not ask the operator to make these changes manually.`
@@ -498,6 +515,8 @@ ${operatorIssueAdminArmed
     ],
     parameters: ContractDraftParams,
     async execute(_id, params, _signal, _update, ctx) {
+      approvalArmed = false;
+      approvalIntent = "none";
       const previous = initiative?.status === "closed" ? undefined : initiative;
       const previousLinear = previous?.contract?.linear;
       const draftInput = params as ContractDraftInput;
@@ -549,7 +568,7 @@ ${operatorIssueAdminArmed
     description: "Approve the review-ready contract locally and prepare optional pi-linear persistence after unambiguous operator approval",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, ctx) {
-      if (!approvalArmed) throw new Error("Approval is not confirmed. Accept any clear operator directive; ask only when intent is genuinely ambiguous.");
+      if (!approvalArmed) throw new Error("The latest operator message was not classified as contract approval. Never suggest `/team-contract approve` because that command does not exist; ask a concise clarification only when the message is genuinely ambiguous.");
       approvalArmed = false;
       if (!initiative?.contract) throw new Error("No review-ready contract is active");
       await reloadContract();
