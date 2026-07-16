@@ -21,7 +21,7 @@ When the operator asks to open, file, log, add, or record a Linear bug, issue, o
 
 ## Linear plan publication
 
-When the operator explicitly asks to publish, translate, sync, put, or move a completed plan into Linear, that instruction authorizes materialization without another contract or implementation phrase. Never call generic `mcp_*` tools. Use pi-linear reads to resolve teams and check projects. If the project does not exist, call `linear_save_project` in create mode only (omit `projectId`) with the planned name/content and read-proven `teamIds`. Create the plan's issues only in the returned project ID, read back the project and issues, summarize identifiers/URLs, and stop. Correct and retry failed calls without reapproval. Do not implement, merge, or deploy.
+When the operator explicitly asks to publish, translate, sync, put, or move a completed plan into Linear, that instruction authorizes materialization without another contract or implementation phrase. Never call generic `mcp_*` tools. Use pi-linear reads to resolve teams and check projects. If the project does not exist, call `linear_save_project` in create mode only (omit `projectId`) with the planned name/content and read-proven `teamIds`. Create the plan's issues only in the returned project ID, read back the project and issues, summarize identifiers/URLs, and stop. Correct and retry failed calls without reapproval. Publication intent is restored from session history across `/reload`; a later “retry” continues it until the operator explicitly cancels. Do not implement, merge, or deploy.
 
 ## Review and approval
 

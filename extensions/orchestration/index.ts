@@ -4,7 +4,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { classifyApprovalIntent, isCompletionDirective, isLinearIssueCreateDirective, isLinearPlanPublishDirective, type ApprovalIntent } from "./approval.ts";
+import { classifyApprovalIntent, isCompletionDirective, isLinearIssueCreateDirective, isLinearPlanPublishCancelDirective, isLinearPlanPublishDirective, restoreLinearPlanPublishIntent, type ApprovalIntent } from "./approval.ts";
 import {
   contractFromInput,
   contractHash,
@@ -87,6 +87,17 @@ const ContractDraftParams = Type.Object({
 
 function textResult(text: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: "text" as const, text }], details };
+}
+
+function sessionUserMessages(ctx: ExtensionContext): string[] {
+  const messages: string[] = [];
+  for (const entry of ctx.sessionManager.getBranch()) {
+    if (entry.type !== "message" || entry.message.role !== "user") continue;
+    const content = entry.message.content;
+    if (typeof content === "string") messages.push(content);
+    else if (Array.isArray(content)) messages.push(content.filter((part) => part.type === "text").map((part) => part.type === "text" ? part.text : "").join("\n"));
+  }
+  return messages;
 }
 
 function displayJson(value: unknown): string {
@@ -189,6 +200,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     project = await resolveProjectContext(ctx.cwd);
     await store.registerProject(project);
     initiative = restoreInitiative(ctx);
+    operatorPlanPublishArmed = restoreLinearPlanPublishIntent(sessionUserMessages(ctx));
     approvalArmed = false;
     approvalIntent = "none";
     operatorIssueCreateArmed = false;
@@ -222,6 +234,7 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
 
   pi.on("session_tree", async (_event, ctx) => {
     initiative = restoreInitiative(ctx);
+    operatorPlanPublishArmed = restoreLinearPlanPublishIntent(sessionUserMessages(ctx));
     delivery = initiative ? await new DeliveryStore(store.initiativeDir(initiative)).latest() : undefined;
     uiSnapshot.initiativeState = initiative?.status;
     uiSnapshot.delivery = delivery;
@@ -248,11 +261,20 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
   pi.on("input", (event) => {
     approvalIntent = classifyApprovalIntent(event.text);
     approvalArmed = approvalIntent === "explicit" && initiative?.status === "review";
-    operatorPlanPublishArmed = isLinearPlanPublishDirective(event.text);
+    const startsPlanPublication = isLinearPlanPublishDirective(event.text);
+    const cancelsPlanPublication = isLinearPlanPublishCancelDirective(event.text);
+    if (startsPlanPublication && !operatorPlanPublishArmed) {
+      linearPlanIssueCount = 0;
+      linearPlanProjectIds = new Set<string>();
+    }
+    if (startsPlanPublication) operatorPlanPublishArmed = true;
+    if (cancelsPlanPublication) {
+      operatorPlanPublishArmed = false;
+      linearPlanIssueCount = 0;
+      linearPlanProjectIds = new Set<string>();
+    }
     operatorIssueCreateArmed = !operatorPlanPublishArmed && isLinearIssueCreateDirective(event.text);
     operatorWorkflowUpdateArmed = isCompletionDirective(event.text);
-    linearPlanIssueCount = 0;
-    linearPlanProjectIds = new Set<string>();
     completedWorkflowStatusIds = new Set<string>();
     return { action: "continue" };
   });
@@ -332,6 +354,10 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     if (!event.isError && /^(?:linear_(?:list|get)_(?:teams|projects))$/.test(event.toolName)) {
       collectLinearResourceAliases(event.details, linearResourceAliases);
       collectLinearResourceAliases(event.content, linearResourceAliases);
+      if (event.toolName === "linear_get_project" && operatorPlanPublishArmed) {
+        const selectedProject = findLinearIssue(event.details) ?? findLinearIssue(event.content);
+        if (selectedProject?.id) linearPlanProjectIds.add(selectedProject.id);
+      }
     }
     if (!event.isError && event.toolName === "linear_list_issue_statuses" && operatorWorkflowUpdateArmed) {
       completedWorkflowStatusIds = collectCompletedStatusIds(event.details);
@@ -393,11 +419,8 @@ export default function orchestrationExtension(pi: ExtensionAPI) {
     approvalArmed = false;
     approvalIntent = "none";
     operatorIssueCreateArmed = false;
-    operatorPlanPublishArmed = false;
     linearCreateInFlight = false;
     linearProjectInFlight = false;
-    linearPlanIssueCount = 0;
-    linearPlanProjectIds = new Set<string>();
     operatorWorkflowUpdateArmed = false;
     completedWorkflowStatusIds = new Set<string>();
   });

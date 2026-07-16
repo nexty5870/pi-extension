@@ -58,6 +58,21 @@ export function isLinearPlanPublishDirective(text: string): boolean {
   return !negated && !deliberative && (publish || create);
 }
 
+export function isLinearPlanPublishCancelDirective(text: string): boolean {
+  const normalized = normalizeApprovalText(text);
+  return /\b(?:cancel|stop|abort|forget)\b.{0,80}\b(?:linear|publish|publication|sync|plan)\b/.test(normalized) ||
+    /\b(?:do not|don t|never)\b.{0,80}\b(?:publish|translate|sync|create|put|move)\b/.test(normalized);
+}
+
+export function restoreLinearPlanPublishIntent(userMessages: string[]): boolean {
+  let armed = false;
+  for (const message of userMessages) {
+    if (isLinearPlanPublishDirective(message)) armed = true;
+    if (isLinearPlanPublishCancelDirective(message)) armed = false;
+  }
+  return armed;
+}
+
 export function classifyApprovalIntent(text: string): ApprovalIntent {
   const normalized = normalizeApprovalText(text);
   if (/\b(?:do not|don t|never|not)\b.*\b(?:approve|accept|implement|proceed|continue|ship|mark|complete|close|set|move|update|change)\b/.test(normalized)) return "none";
