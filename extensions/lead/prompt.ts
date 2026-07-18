@@ -1,3 +1,4 @@
+import { isGreptileEvidence } from "./github.ts";
 import type { TaskRecord } from "./types.ts";
 
 function section(title: string, body: string | undefined): string {
@@ -20,6 +21,7 @@ export function workerPrompt(task: TaskRecord, reviewPacketPath?: string): strin
         "Review the issue, every acceptance criterion, the exact current diff, and validation evidence.",
         "Do not modify files. You may run read-only inspection and validation commands.",
         `Read the review packet at ${reviewPacketPath ?? "the path supplied by the Lead"}; run git diff yourself if its diff is truncated.`,
+        "If a verdict is rejected because the diff, HEAD, or validation evidence moved, call lead_worker_report with rebindReviewTarget: true to re-capture the target at the current HEAD, review the refreshed packet delta, then report the verdict again. Do not wait for a new review worker.",
         "Before finishing, call lead_worker_report with a verdict, findings, and an acceptance matrix containing evidence for every criterion.",
       ]
     : task.role === "research"
@@ -79,6 +81,10 @@ export function reviewPacket(task: TaskRecord, parent: TaskRecord, git: {
   const githubChecks = parent.pullRequest?.checks.length
     ? parent.pullRequest.checks.map((check) => `- ${check.name}: ${check.status}${check.details ? ` — ${check.details}` : ""}`).join("\n")
     : undefined;
+  const greptile = [...parent.checks, ...(parent.pullRequest?.checks ?? [])].filter(isGreptileEvidence);
+  const greptileSection = greptile.length > 0
+    ? greptile.map((check) => `- ${check.name}: ${check.status}${check.details ? ` — ${check.details}` : ""}`).join("\n")
+    : undefined;
   return [
     `# Review packet: ${parent.brief.title}`,
     "",
@@ -94,6 +100,7 @@ export function reviewPacket(task: TaskRecord, parent: TaskRecord, git: {
     section("Implementer handoff", parent.handoff ?? parent.summary),
     section("Validation evidence", checks),
     section("GitHub check evidence", githubChecks),
+    section("Greptile review", greptileSection),
     section("Pull request", parent.pullRequest?.url),
     section("Git status", git.status || "clean"),
     "## Exact diff",
@@ -115,6 +122,6 @@ Delegate when a separate context is genuinely useful. Use lead_delegate for impl
 
 For issue-backed work, give workers the actual issue context and acceptance criteria. When an implementation comes from Linear, pass its exact identifier or URL in lead_delegate.linearIssue. Immediately follow the emitted Linear lifecycle instruction: use @alasano/pi-linear reads to resolve the issue's team and canonical started/In Progress state, update only that issue's stateId, and verify with linear_get_issue readback. Do not invent a Linear binding for local or GitHub-only work, and never block worker startup when Linear is absent or unavailable.
 
-Before accepting implementation, create an independent review worker so its packet includes the issue, criteria, exact diff, and validation evidence. Use lead_message_worker to steer an existing worker instead of replacing it unnecessarily. Use lead_update_worker only to reconcile state after direct operator intervention or a worker exit. Use lead_refresh_pr to distinguish pending, failed, green, and merged PR states.
+Before accepting implementation, create an independent review worker so its packet includes the issue, criteria, exact diff, and validation evidence. When an implementation reports PR-ready, V2 automatically launches the bound review worker unless the project record sets autoReview: false; you still receive every durable wake event. If a reviewer reports a stale-evidence rejection, steer it to rebind its review target instead of creating a replacement worker. Use lead_message_worker to steer an existing worker instead of replacing it unnecessarily. Use lead_update_worker only to reconcile state after direct operator intervention or a worker exit. Use lead_refresh_pr to distinguish pending, failed, green, and merged PR states.
 
 Implementation authorizes an isolated branch, commits, normal push, and PR preparation. It never implies merge, deployment, production mutation, force-push, destructive Linear operations, or unrelated changes. Merge and deployment require separate direct operator authorization.`;

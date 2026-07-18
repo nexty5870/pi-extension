@@ -172,6 +172,7 @@ export class LeadStore {
         projectRoot: resolve(input.projectRoot),
         projectName: input.projectName,
         leadSessionFile: input.leadSessionFile ?? existing?.leadSessionFile,
+        autoReview: existing?.autoReview,
         cmux,
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,

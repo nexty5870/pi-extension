@@ -6,7 +6,7 @@ import { currentPiInvocation, renderLaunchScript, writeLaunchScript } from "./la
 import { CmuxWorkers } from "./cmux.ts";
 import type { CommandExecutor, GitProject } from "./git.ts";
 import { GitWorktrees } from "./git.ts";
-import { observePullRequest } from "./github.ts";
+import { isGreptileEvidence, observePullRequest } from "./github.ts";
 import {
   automaticLinearUpdateSafetyReason,
   linearLifecycleHasPendingWriteScope,
@@ -15,17 +15,19 @@ import {
 } from "./linear-lifecycle.ts";
 import { reviewPacket, workerPrompt } from "./prompt.ts";
 import { createTaskId, LeadStore } from "./store.ts";
-import type {
-  AcceptanceEvidence,
-  CheckEvidence,
-  LeadTaskEvent,
-  LinearLifecycleState,
-  ProjectRecord,
-  ReviewEvidence,
-  TaskRecord,
-  TaskStatus,
-  WorkerMessage,
-  WorkerRole,
+import {
+  isTerminalTaskStatus,
+  type AcceptanceEvidence,
+  type CheckEvidence,
+  type LeadTaskEvent,
+  type LinearLifecycleState,
+  type ProjectRecord,
+  type ReviewEvidence,
+  type ReviewTarget,
+  type TaskRecord,
+  type TaskStatus,
+  type WorkerMessage,
+  type WorkerRole,
 } from "./types.ts";
 
 export interface DelegateInput {
@@ -60,6 +62,7 @@ export interface WorkerReportInput {
   commitSha?: string;
   checks?: CheckEvidence[];
   reviewVerdict?: "approved" | "changes-requested";
+  rebindReviewTarget?: boolean;
   acceptance?: AcceptanceEvidence[];
   findings?: string[];
 }
@@ -90,15 +93,23 @@ function normalizedCriterion(value: string): string {
 }
 
 export function validationEvidenceHash(checks: CheckEvidence[]): string {
+  // Hash name + status of non-Greptile checks only: cosmetic re-reports (new CI
+  // run IDs, refreshed details) and additive Greptile evidence must not
+  // invalidate an otherwise-valid review fingerprint. Greptile stays on the task
+  // for display/readiness reporting, but never joins any fingerprint.
   const normalized = checks
-    .map((check) => ({ name: check.name.trim(), status: check.status, details: check.details?.trim() || "" }))
+    .filter((check) => !isGreptileEvidence(check))
+    .map((check) => ({ name: check.name.trim(), status: check.status }))
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
 export function validationEvidenceIsComplete(checks: CheckEvidence[]): boolean {
-  return checks.some((check) => check.status === "passed")
-    && checks.every((check) => check.name.trim() && check.status !== "failed" && check.status !== "pending");
+  // Greptile is additive evidence: it cannot satisfy the passing-check
+  // requirement on its own, and terminal Greptile entries never block.
+  const validation = checks.filter((check) => !isGreptileEvidence(check));
+  return validation.some((check) => check.status === "passed")
+    && validation.every((check) => check.name.trim() && check.status !== "failed" && check.status !== "pending");
 }
 
 export function readinessEvidenceHash(task: TaskRecord): string {
@@ -120,7 +131,8 @@ export function readinessEvidenceHash(task: TaskRecord): string {
       headSha: task.pullRequest.headSha,
       mergeState: task.pullRequest.mergeState,
       checksHash: validationEvidenceHash(task.pullRequest.checks),
-      observedAt: task.pullRequest.observedAt,
+      // observedAt is intentionally excluded: it changes on every CI poll and
+      // would otherwise spuriously invalidate verdict/rebind re-checks.
     } : undefined,
   };
   return createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
@@ -468,6 +480,94 @@ export class LeadCoordinator {
     }));
   }
 
+  async rebindReviewTarget(projectId: string, taskId: string, signal?: AbortSignal): Promise<TaskRecord> {
+    const task = await this.store.requireTask(projectId, taskId);
+    if (task.role !== "review" || !task.parentTaskId) {
+      throw new Error("Only a bound review worker can rebind its review target");
+    }
+    const parent = await this.store.requireTask(projectId, task.parentTaskId);
+    if (!parent.baseSha) throw new Error("The implementation task has no review base SHA");
+    const expectedParentHash = readinessEvidenceHash(parent);
+    const capture = await this.git.reviewPacket(parent.worktreePath, parent.baseSha, signal);
+    // Verify the parent readiness fingerprint before touching durable state so a
+    // concurrent mutation cannot leave a persisted target pointing at a stale packet.
+    const parentAfter = await this.store.requireTask(projectId, parent.id);
+    if (readinessEvidenceHash(parentAfter) !== expectedParentHash) {
+      throw new Error("Implementation evidence changed during the rebind; retry the rebind against the current HEAD");
+    }
+    const target: ReviewTarget = {
+      parentTaskId: parent.id,
+      diffBaseSha: parent.baseSha,
+      diffHash: capture.diffHash,
+      headSha: capture.headSha,
+      checksHash: validationEvidenceHash(parentAfter.checks),
+      capturedAt: timestamp(),
+    };
+    const packetPath = join(this.store.taskArtifactDirectory(projectId, task.id), "review-packet.md");
+    await privateText(packetPath, reviewPacket(task, parentAfter, capture));
+    return this.store.updateTask(projectId, task.id, (current) => {
+      if (JSON.stringify(current.reviewTarget) !== JSON.stringify(task.reviewTarget)) {
+        throw new Error("Review target changed while rebinding; retry the rebind");
+      }
+      return { ...current, reviewTarget: target };
+    });
+  }
+
+  async maybeAutoReview(projectId: string, parentTaskId: string, signal?: AbortSignal): Promise<TaskRecord | undefined> {
+    const project = await this.store.readProject(projectId);
+    if (!project || project.autoReview === false) return undefined;
+    return serialized(projectId, async () => {
+      const parent = await this.store.readTask(projectId, parentTaskId);
+      if (!parent || parent.role !== "implementation" || !parent.pullRequest?.url || !parent.baseSha) return undefined;
+      if (parent.status !== "pr-ready-ci-pending" && parent.status !== "completed") return undefined;
+      if (parent.review?.verdict === "approved") return undefined;
+      const siblings = await this.store.listTasks(projectId);
+      const active = siblings.some((candidate) =>
+        candidate.role === "review" && candidate.parentTaskId === parent.id && !isTerminalTaskStatus(candidate.status));
+      if (active) return undefined;
+      if (!project.cmux?.workspaceId || !project.cmux.callerSurfaceId) {
+        return this.store.updateTask(projectId, parent.id, (current) => ({
+          ...current,
+          autoReview: { attemptedAt: timestamp(), error: "Auto-review requires a persisted cmux workspace and caller surface" },
+        })).then(() => undefined);
+      }
+      const attemptedAt = timestamp();
+      try {
+        const gitProject = await this.git.inspect(project.projectRoot, signal);
+        const review = await this.delegateSerialized({
+          title: `Review · ${parent.brief.title}`,
+          task: [
+            `Independently review the implementation "${parent.brief.title}" (task ${parent.id.slice(0, 8)}).`,
+            "Verify the issue, every acceptance criterion, the exact current diff, and the validation evidence.",
+            "Report a verdict with findings and an acceptance matrix covering every criterion.",
+          ].join(" "),
+          role: "review",
+          parentTaskId: parent.id,
+        }, {
+          cwd: project.projectRoot,
+          sessionFile: project.leadSessionFile,
+          cmuxWorkspaceId: project.cmux.workspaceId,
+          cmuxSurfaceId: project.cmux.callerSurfaceId,
+          signal,
+        }, gitProject, project);
+        await this.store.updateTask(projectId, parent.id, (current) => ({
+          ...current,
+          autoReview: { spawnedTaskId: review.id, attemptedAt },
+        }));
+        return review;
+      } catch (error) {
+        await this.store.updateTask(projectId, parent.id, (current) => ({
+          ...current,
+          autoReview: {
+            attemptedAt,
+            error: `Auto-review spawn failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        })).catch(() => undefined);
+        return undefined;
+      }
+    });
+  }
+
   async report(projectId: string, taskId: string, input: WorkerReportInput, signal?: AbortSignal): Promise<TaskRecord> {
     const status = input.status;
     if (status === "starting") throw new Error("starting is coordinator-owned and cannot be worker-reported");
@@ -476,6 +576,12 @@ export class LeadCoordinator {
     }
     if (status === "blocked" && !input.blockedReason?.trim()) throw new Error("blocked status requires blockedReason");
     const reportingTask = await this.store.requireTask(projectId, taskId);
+    if (input.rebindReviewTarget) {
+      if (input.reviewVerdict || input.status || input.checks) {
+        throw new Error("Rebind the review target first, then report status or the verdict in a separate call");
+      }
+      return this.rebindReviewTarget(projectId, reportingTask.id, signal);
+    }
     let review: ReviewEvidence | undefined;
     let reviewedParentEvidenceHash: string | undefined;
     if (input.reviewVerdict) {
@@ -486,10 +592,10 @@ export class LeadCoordinator {
       reviewedParentEvidenceHash = readinessEvidenceHash(parent);
       const currentDiff = await this.git.reviewPacket(parent.worktreePath, parent.baseSha, signal);
       if (currentDiff.diffHash !== reportingTask.reviewTarget.diffHash || currentDiff.headSha !== reportingTask.reviewTarget.headSha) {
-        throw new Error("Implementation diff or HEAD changed after this review started; create a fresh review worker for the current revision");
+        throw new Error(`Implementation diff or HEAD changed after this review started; ${REBIND_GUIDANCE}`);
       }
       if (validationEvidenceHash(parent.checks) !== reportingTask.reviewTarget.checksHash) {
-        throw new Error("Implementation validation evidence changed after this review started; create a fresh review worker");
+        throw new Error(`Implementation validation evidence changed after this review started; ${REBIND_GUIDANCE}`);
       }
       const acceptance = input.acceptance ?? [];
       if (acceptance.some((entry) => !entry.criterion.trim() || !entry.evidence.trim())) {
@@ -527,11 +633,16 @@ export class LeadCoordinator {
 
     const task = await this.store.updateTask(projectId, reportingTask.id, (current) => {
       if (review && JSON.stringify(current.reviewTarget) !== JSON.stringify(reportingTask.reviewTarget)) {
-        throw new Error("Review target changed while the verdict was being recorded; create a fresh review");
+        throw new Error(`Review target changed while the verdict was being recorded; ${REBIND_GUIDANCE}`);
       }
       let nextStatus = taskStatusAfterReport(current, input);
       let blockedReason = nextStatus === "blocked" ? input.blockedReason?.trim() : undefined;
-      const nextChecks = input.checks ?? current.checks;
+      // Worker check re-reports replace prior worker evidence. Greptile entries
+      // merged from the GitHub rollup persist for display until the next rollup
+      // observation and never join the review fingerprint.
+      const nextChecks = input.checks
+        ? [...current.checks.filter(isGreptileEvidence), ...input.checks.filter((check) => !isGreptileEvidence(check))]
+        : current.checks;
       let effectiveReview = review ?? retainedReview;
       if (current.role === "implementation" && effectiveReview?.checksHash !== validationEvidenceHash(nextChecks)) {
         effectiveReview = undefined;
@@ -567,7 +678,7 @@ export class LeadCoordinator {
     if (review && task.parentTaskId) {
       const parent = await this.store.updateTask(projectId, task.parentTaskId, (current) => {
         if (!reviewedParentEvidenceHash || readinessEvidenceHash(current) !== reviewedParentEvidenceHash) {
-          throw new Error("Implementation evidence changed while review approval was being recorded; create a fresh review");
+          throw new Error(`Implementation evidence changed while review approval was being recorded; ${REBIND_GUIDANCE}`);
         }
         const reviewWasOnlyBlock = current.blockedReason?.startsWith("Review requested changes") || current.blockedReason?.includes("independent review");
         return {
@@ -598,6 +709,10 @@ export class LeadCoordinator {
         await cmux.flash(task.surface.surfaceId, signal);
       }
     }
+    if (reportingTask.role === "implementation") {
+      const chained = await this.maybeAutoReview(projectId, task.id, signal);
+      if (chained) return this.store.requireTask(projectId, task.id);
+    }
     return task;
   }
 
@@ -606,6 +721,15 @@ export class LeadCoordinator {
     const expectedEvidenceHash = readinessEvidenceHash(task);
     if (!task.pullRequest?.url) throw new Error(`Worker ${task.id.slice(0, 8)} has not reported a pull request`);
     const observation = await observePullRequest(this.execute, task.worktreePath, task.pullRequest.url, signal);
+    // Greptile results in the GitHub check rollup become first-class validation
+    // evidence on the task. Only terminal outcomes are merged so a still-running
+    // Greptile never gates approval; failed Greptile checks stay visible on the
+    // pull request checks where the green path already blocks.
+    const greptile = observation.checks.filter((check) =>
+      isGreptileEvidence(check) && (check.status === "passed" || check.status === "skipped"));
+    const effectiveChecks = greptile.length > 0
+      ? [...task.checks.filter((check) => !isGreptileEvidence(check)), ...greptile]
+      : task.checks;
     let status: TaskStatus = observation.status === "green"
       ? "pr-ready-ci-green"
       : observation.status === "pending"
@@ -630,10 +754,10 @@ export class LeadCoordinator {
       } else if (task.review.diffHash !== currentDiff.diffHash || task.review.headSha !== currentDiff.headSha) {
         status = "blocked";
         blockedReason = "The implementation revision changed after independent review";
-      } else if (task.review.checksHash !== validationEvidenceHash(task.checks)) {
+      } else if (task.review.checksHash !== validationEvidenceHash(effectiveChecks)) {
         status = "blocked";
         blockedReason = "Validation evidence changed after independent review";
-      } else if (!validationEvidenceIsComplete(task.checks)) {
+      } else if (!validationEvidenceIsComplete(effectiveChecks)) {
         status = "blocked";
         blockedReason = "Independent review lacks at least one passing check and complete non-failing validation evidence";
       } else if (currentDiff.headSha !== observation.headSha) {
@@ -650,6 +774,7 @@ export class LeadCoordinator {
         ...current,
         status,
         blockedReason,
+        checks: effectiveChecks,
         pullRequest: {
           url: observation.url,
           headSha: observation.headSha,
@@ -668,6 +793,8 @@ export class LeadCoordinator {
   }
 }
 
+const REBIND_GUIDANCE = "call lead_worker_report with rebindReviewTarget: true to re-capture the review target at the parent's current HEAD, review the refreshed packet delta, then report the verdict again";
+
 export function workerLabel(task: TaskRecord): string {
   return `${task.id.slice(0, 8)} ${task.role} · ${task.brief.title}`;
 }
@@ -677,6 +804,11 @@ export function summarizeTasks(tasks: TaskRecord[]): string {
   return tasks.map((task) => {
     const detail = task.blockedReason || task.failure || task.pullRequest?.url || task.summary;
     const linear = task.linear ? `\n  Linear ${task.linear.issueIdentifier}: ${task.linear.status}${task.linear.stateName ? ` (${task.linear.stateName})` : ""}${task.linear.lastError ? ` — ${task.linear.lastError}` : ""}` : "";
-    return `${task.id.slice(0, 8)}  ${task.status.padEnd(19)}  ${task.role.padEnd(14)}  ${task.brief.title}${detail ? `\n  ${detail}` : ""}${linear}`;
+    const greptile = [...task.checks, ...(task.pullRequest?.checks ?? [])].find(isGreptileEvidence);
+    const greptileLine = greptile ? `\n  Greptile: ${greptile.status}${greptile.details ? ` — ${greptile.details}` : ""}` : "";
+    const autoReview = task.role === "implementation" && task.autoReview
+      ? `\n  Auto-review: ${task.autoReview.error ?? `spawned ${task.autoReview.spawnedTaskId?.slice(0, 8) ?? "unknown"}`}`
+      : "";
+    return `${task.id.slice(0, 8)}  ${task.status.padEnd(19)}  ${task.role.padEnd(14)}  ${task.brief.title}${detail ? `\n  ${detail}` : ""}${greptileLine}${autoReview}${linear}`;
   }).join("\n");
 }

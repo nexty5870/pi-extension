@@ -1,6 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { join } from "node:path";
 import { Type } from "typebox";
 import { LeadCoordinator, summarizeTasks, workerLabel } from "./coordinator.ts";
 import { deliveredLeadEventIds, isActionableWorkerState, pendingLeadEvents, workerEventMessage } from "./events.ts";
@@ -31,6 +32,16 @@ import {
   sensitiveResolvedPathReason,
 } from "./safety.ts";
 import { defaultLeadStateDir, LeadStore } from "./store.ts";
+import {
+  leadStatusSummary,
+  taskLine,
+  TRIAGE_ACTION_BACK,
+  TRIAGE_ACTION_DISMISS,
+  TRIAGE_ACTION_MESSAGE,
+  TRIAGE_ACTION_STOP,
+  triageActions,
+  triageDetail,
+} from "./triage.ts";
 import type { TaskRecord, WorkerRole } from "./types.ts";
 
 declare const __filename: string;
@@ -69,15 +80,6 @@ const AcceptanceSchema = Type.Object({
 
 function modelName(ctx: ExtensionContext): string | undefined {
   return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-}
-
-function taskLine(task: TaskRecord): string {
-  const icon = task.status === "pr-ready-ci-green" || task.status === "completed" || task.status === "merged"
-    ? "✓"
-    : task.status === "blocked" || task.status === "failed"
-      ? "!"
-      : "•";
-  return `${icon} ${task.id.slice(0, 8)} ${task.status} · ${task.brief.title}`;
 }
 
 function shouldResetLegacyUi(ctx: ExtensionContext): boolean {
@@ -224,16 +226,13 @@ export default function leadExtension(pi: ExtensionAPI) {
     try {
       const tasks = await coordinator.list(dashboardProjectId).catch(() => []);
       const active = tasks.filter((task) => !["completed", "failed", "stopped", "merged"].includes(task.status));
-      const running = active.filter((task) => task.status === "running" || task.status === "starting").length;
-      const blocked = active.filter((task) => task.status === "blocked").length;
-      const green = active.filter((task) => task.status === "pr-ready-ci-green").length;
-      dashboardContext.ui.setStatus(
-        STATUS_KEY,
-        `Lead · ${active.length} active${running ? ` · ${running} running` : ""}${blocked ? ` · ${blocked} blocked` : ""}${green ? ` · ${green} green` : ""}`,
-      );
+      const pendingCount = pendingLeadEvents(tasks).length;
+      dashboardContext.ui.setStatus(STATUS_KEY, leadStatusSummary(tasks, pendingCount));
       dashboardContext.ui.setWidget(
         WIDGET_KEY,
-        active.length > 0 ? ["Lead workers", ...active.slice(0, 6).map(taskLine)] : undefined,
+        active.length > 0
+          ? [`Lead workers${pendingCount ? ` · ${pendingCount} event${pendingCount === 1 ? "" : "s"} pending` : ""}`, ...active.slice(0, 6).map(taskLine)]
+          : undefined,
         { placement: "aboveEditor" },
       );
 
@@ -609,6 +608,9 @@ export default function leadExtension(pi: ExtensionAPI) {
         commitSha: Type.Optional(Type.String()),
         checks: Type.Optional(Type.Array(CheckSchema, { maxItems: 100 })),
         reviewVerdict: Type.Optional(StringEnum(["approved", "changes-requested"] as const)),
+        rebindReviewTarget: Type.Optional(Type.Boolean({
+          description: "Review workers only: re-capture the review target at the parent implementation's current HEAD (new headSha/diffHash/checksHash) and refresh review-packet.md, then re-review the delta and report the verdict in a separate call.",
+        })),
         acceptance: Type.Optional(Type.Array(AcceptanceSchema, { maxItems: 100 })),
         findings: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
       }),
@@ -617,20 +619,75 @@ export default function leadExtension(pi: ExtensionAPI) {
         const task = await coordinator.report(workerProjectId, workerTaskId, params, signal);
         ctx.ui.setStatus(STATUS_KEY, `${task.role} · ${task.status}`);
         ctx.ui.setWidget(WIDGET_KEY, [taskLine(task), `Lead task ${task.id.slice(0, 8)}`], { placement: "aboveEditor" });
+        if (params.rebindReviewTarget && task.reviewTarget) {
+          const packetPath = join(store.taskArtifactDirectory(workerProjectId, workerTaskId), "review-packet.md");
+          return textResult(
+            `Review target rebound to HEAD ${task.reviewTarget.headSha.slice(0, 12)} (diff ${task.reviewTarget.diffHash.slice(0, 12)}). Re-review the delta in the refreshed packet at ${packetPath}, then report your verdict.`,
+            { task },
+          );
+        }
         return textResult(`Lead updated: ${task.status}.`, { task });
       },
     });
   }
 
   pi.registerCommand("workers", {
-    description: "Show visible Lead workers and durable status",
+    description: "Triage visible Lead workers: inspect status, blocked reasons, message, stop, or dismiss",
     handler: async (_args, ctx) => {
       const projectId = workerProjectId ?? (await coordinator.project({ cwd: ctx.cwd }).catch(() => undefined))?.record.projectId;
       if (!projectId) {
         ctx.ui.notify("No Lead project is active in this directory", "warning");
         return;
       }
-      ctx.ui.notify(summarizeTasks(await coordinator.list(projectId)), "info");
+      if (isWorker || !ctx.hasUI) {
+        ctx.ui.notify(summarizeTasks(await coordinator.list(projectId)), "info");
+        return;
+      }
+      while (true) {
+        const tasks = await coordinator.list(projectId);
+        if (tasks.length === 0) {
+          ctx.ui.notify("No delegated workers yet.", "info");
+          return;
+        }
+        const pendingCount = pendingLeadEvents(tasks).length;
+        const options = tasks.map(taskLine);
+        const picked = await ctx.ui.select(
+          `Lead workers${pendingCount ? ` · ${pendingCount} event${pendingCount === 1 ? "" : "s"} pending` : ""}`,
+          options,
+        );
+        if (picked === undefined) return;
+        const task = tasks[options.indexOf(picked)];
+        if (!task) return;
+        const action = await ctx.ui.select(triageDetail(task), triageActions(task));
+        if (action === undefined || action === TRIAGE_ACTION_BACK) continue;
+        if (action === TRIAGE_ACTION_MESSAGE) {
+          const message = await ctx.ui.input(`Message for ${task.id.slice(0, 8)}:`, "Steer this worker");
+          if (message?.trim()) {
+            await coordinator.message(projectId, task.id, message);
+            ctx.ui.notify(`Message queued for ${task.id.slice(0, 8)}`, "info");
+          }
+          continue;
+        }
+        if (action === TRIAGE_ACTION_STOP) {
+          const confirmed = await ctx.ui.confirm(
+            `Mark ${task.id.slice(0, 8)} stopped?`,
+            `${task.brief.title}\n\nThis reconciles durable state only; it does not kill the process or delete the worktree.`,
+          );
+          if (confirmed) {
+            await coordinator.report(projectId, task.id, { status: "stopped", summary: "Marked stopped from the /workers triage picker" });
+            ctx.ui.notify(`${task.id.slice(0, 8)}: stopped`, "info");
+            await updateDashboard(false);
+          }
+          continue;
+        }
+        if (action === TRIAGE_ACTION_DISMISS) {
+          const pending = pendingLeadEvents([task]).map(({ event }) => event.id);
+          if (pending.length > 0) await coordinator.markLeadEventsObserved(projectId, task.id, pending);
+          await coordinator.markLeadObserved(projectId, task.id);
+          ctx.ui.notify(`${task.id.slice(0, 8)}: dismissed ${pending.length} pending event${pending.length === 1 ? "" : "s"}`, "info");
+          await updateDashboard(false);
+        }
+      }
     },
   });
 
@@ -671,6 +728,7 @@ export default function leadExtension(pi: ExtensionAPI) {
           `Caller workspace: ${process.env.CMUX_WORKSPACE_ID || "missing"}`,
           `Caller surface: ${process.env.CMUX_SURFACE_ID || "missing"}`,
           `Worker extension: ${extensionPath || "package discovery"}`,
+          `Auto-review chain: ${context.record.autoReview === false ? "off (project opt-out)" : "on"}`,
           `State: ${store.root}`,
         ];
         ctx.ui.notify(lines.join("\n"), cmux.code === 0 && version.code === 0 ? "info" : "warning");
