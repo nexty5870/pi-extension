@@ -316,19 +316,36 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   harness.merged = false;
   harness.headSha = green.pullRequest?.headSha ?? harness.headSha;
 
+  // Cosmetic check re-reports (same name/status, new details) must not invalidate the review.
   const evidenceChanged = await coordinator.report(implementation.projectId, implementation.id, {
     status: "pr-ready-ci-pending",
     checks: [{ name: "npm test", status: "passed", details: "43 tests" }],
   });
-  assert.equal(evidenceChanged.review, undefined);
+  assert.equal(evidenceChanged.review?.verdict, "approved");
+  const stillGreen = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
+  assert.equal(stillGreen.status, "pr-ready-ci-green");
+
+  // A genuine evidence change (new check name) still drops the review fingerprint.
+  const reviewDropped = await coordinator.report(implementation.projectId, implementation.id, {
+    status: "pr-ready-ci-pending",
+    checks: [
+      { name: "npm test", status: "passed", details: "43 tests" },
+      { name: "npm run typecheck", status: "passed" },
+    ],
+  });
+  assert.equal(reviewDropped.review, undefined);
   const staleEvidence = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
   assert.equal(staleEvidence.status, "blocked");
   assert.match(staleEvidence.blockedReason ?? "", /independent review/);
+  await coordinator.report(implementation.projectId, implementation.id, {
+    status: "pr-ready-ci-pending",
+    checks: [{ name: "npm test", status: "passed", details: "43 tests" }],
+  });
 
   harness.onGh = async () => {
     await store.updateTask(implementation.projectId, implementation.id, (current) => ({
       ...current,
-      checks: [{ name: "npm test", status: "passed", details: "changed during GitHub observation" }],
+      checks: [{ name: "npm test", status: "failed", details: "changed during GitHub observation" }],
     }));
   };
   await assert.rejects(

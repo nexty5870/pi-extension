@@ -8,7 +8,10 @@ interface CheckRollup {
   status?: string;
   conclusion?: string;
   state?: string;
+  title?: string;
+  description?: string;
   detailsUrl?: string;
+  targetUrl?: string;
   link?: string;
 }
 
@@ -33,6 +36,26 @@ function checkName(check: CheckRollup, index: number): string {
   return check.name?.trim() || check.context?.trim() || `${check.__typename ?? "check"}-${index + 1}`;
 }
 
+const GREPTILE = /greptile/i;
+
+function checkUrl(check: CheckRollup): string | undefined {
+  return check.detailsUrl || check.targetUrl || check.link;
+}
+
+export function isGreptileEvidence(check: Pick<CheckEvidence, "name" | "details">): boolean {
+  return GREPTILE.test(check.name) || GREPTILE.test(check.details ?? "");
+}
+
+function checkDetails(check: CheckRollup): string | undefined {
+  const url = checkUrl(check);
+  const summary = check.description?.trim() || check.title?.trim() || "";
+  const name = `${check.name ?? ""} ${check.context ?? ""} ${url ?? ""}`;
+  if (GREPTILE.test(name)) {
+    return [summary, url].filter(Boolean).join(" — ") || undefined;
+  }
+  return url;
+}
+
 export function classifyPullRequest(payload: PullRequestPayload, fallbackUrl = ""): PullRequestObservation {
   const url = payload.url?.trim() || fallbackUrl;
   if (!url) throw new Error("GitHub did not return a pull request URL");
@@ -47,7 +70,7 @@ export function classifyPullRequest(payload: PullRequestPayload, fallbackUrl = "
     return {
       name: checkName(check, index),
       status,
-      details: check.detailsUrl || check.link,
+      details: checkDetails(check),
     };
   });
 

@@ -19,9 +19,9 @@ Every worker is a live terminal surface in the caller's cmux workspace. The oper
 
 For issue-backed work, pass the actual issue content and explicit acceptance criteria. Never replace issue scope with an invented smaller task. If the implementation came from Linear, also pass the exact identifier or URL as `linearIssue`; omit it for local/GitHub-only work. As soon as that implementation worker is running, follow the emitted lifecycle instruction with @alasano/pi-linear: read the issue/team, resolve the read-proven In Progress (or canonical `started`) state ID, update only `stateId`, and verify via `linear_get_issue` readback. Missing Linear configuration never blocks implementation.
 
-Before accepting implementation, delegate an independent review with the implementation task's `parentTaskId`. Review must return evidence for every acceptance criterion.
+Before accepting implementation, delegate an independent review with the implementation task's `parentTaskId`. When an implementation reports PR-ready, V2 auto-spawns that bound review worker (per-project opt-out: `"autoReview": false` in the project record); a manual review delegate is only needed when auto-review is off or failed. Review must return evidence for every acceptance criterion. If a reviewer's verdict is rejected for stale evidence, steer it to call `lead_worker_report` with `rebindReviewTarget: true` and re-review the refreshed packet delta instead of delegating a replacement worker.
 
-Use `lead_workers` to reconcile state, `lead_update_worker` after direct operator intervention or process exit, and `lead_refresh_pr` for authoritative GitHub status. Pending, failed, green, and merged are different states. A green PR requires reported validation, an approved independent review of the unchanged diff, a clean worktree, a matching PR head, and green GitHub checks (or no checks)—not merely a PR URL.
+Use `lead_workers` to reconcile state, `lead_update_worker` after direct operator intervention or process exit, and `lead_refresh_pr` for authoritative GitHub status. Pending, failed, green, and merged are different states. A green PR requires reported validation, an approved independent review of the unchanged diff, a clean worktree, a matching PR head, and green GitHub checks (or no checks)—not merely a PR URL. Validation hashes cover check name + status only; Greptile results in the check rollup surface as additive first-class evidence and never skip the independent reviewer.
 
 ## Worker handoff
 
@@ -31,7 +31,7 @@ Workers call `lead_worker_report` at meaningful transitions. Those transitions w
 - `pr-ready-ci-pending`
 - `completed`, `failed`, or `stopped`
 
-Green and merged transitions come only from authoritative `lead_refresh_pr` observation, not worker self-report. Reports should include validation checks, PR URL/commit when available, a concise handoff, and—on review workers—verdict, findings, and an acceptance matrix. Initial `running` is persisted but does not wake the Lead because the delegation turn already has that result.
+Green and merged transitions come only from authoritative `lead_refresh_pr` observation, not worker self-report. Reports should include validation checks, PR URL/commit when available, a concise handoff, and—on review workers—verdict, findings, and an acceptance matrix. Initial `running` is persisted but does not wake the Lead because the delegation turn already has that result. The footer widget shows truncated blocked reasons and a pending-event count; `/workers` opens an interactive triage picker (details, message, mark stopped, dismiss events) and degrades to a plain summary in non-TTY contexts.
 
 ## Boundaries
 

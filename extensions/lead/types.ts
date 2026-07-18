@@ -69,6 +69,12 @@ export interface PullRequestState {
   observedAt?: string;
 }
 
+export interface AutoReviewState {
+  spawnedTaskId?: string;
+  attemptedAt: string;
+  error?: string;
+}
+
 export interface WorkerSurface {
   workspaceId: string;
   paneId: string;
@@ -152,6 +158,7 @@ export interface TaskRecord {
   checks: CheckEvidence[];
   review?: ReviewEvidence;
   reviewTarget?: ReviewTarget;
+  autoReview?: AutoReviewState;
   messages?: WorkerMessage[];
   linear?: LinearLifecycleState;
   leadEvents?: LeadTaskEvent[];
@@ -169,6 +176,7 @@ export interface ProjectRecord {
   projectRoot: string;
   projectName: string;
   leadSessionFile?: string;
+  autoReview?: boolean;
   cmux?: {
     workspaceId: string;
     callerSurfaceId: string;
