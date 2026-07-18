@@ -80,6 +80,13 @@ export function parseLinearIssueSnapshot(details: unknown, content: unknown): Li
   };
 }
 
+export function linearStatusFilterTeamId(input: unknown): string | undefined {
+  const filter = object(object(input)?.filter);
+  const team = object(filter?.team);
+  const id = object(team?.id);
+  return string(id?.eq);
+}
+
 export function parseLinearWorkflowStates(details: unknown, content: unknown): LinearWorkflowStateSnapshot[] {
   const rawStates = resultPayload(details, content)?.states;
   if (!Array.isArray(rawStates)) return [];
@@ -129,6 +136,7 @@ export function linearLifecycleAfterStatuses(
       ...current,
       candidateStateId: undefined,
       candidateStateName: undefined,
+      candidateTeamId: undefined,
       candidateObservedAt: undefined,
       lastError: "No unambiguous In Progress workflow state was returned for the issue team",
       updatedAt: now,
@@ -138,6 +146,7 @@ export function linearLifecycleAfterStatuses(
     ...current,
     candidateStateId: candidate.id,
     candidateStateName: candidate.name,
+    candidateTeamId: current.teamId,
     candidateObservedAt: now,
     lastError: undefined,
     updatedAt: now,
@@ -180,7 +189,12 @@ export function automaticLinearUpdateSafetyReason(
   const candidateIds = new Set(lifecycleTasks
     .filter((task) => {
       const observed = Date.parse(task.linear?.candidateObservedAt ?? "");
-      return Number.isFinite(observed) && Date.now() - observed < 5 * 60_000;
+      const issueObserved = Date.parse(task.linear?.issueObservedAt ?? "");
+      return Number.isFinite(observed)
+        && Number.isFinite(issueObserved)
+        && observed >= issueObserved
+        && Date.now() - observed < 5 * 60_000
+        && task.linear?.candidateTeamId === task.linear?.teamId;
     })
     .map((task) => task.linear?.candidateStateId)
     .filter((id): id is string => Boolean(id)));
@@ -260,6 +274,10 @@ export function linearLifecycleAfterToolResult(
       issueObservedAt: now,
       stateId: snapshot.state?.id,
       stateName: snapshot.state?.name,
+      candidateStateId: undefined,
+      candidateStateName: undefined,
+      candidateTeamId: undefined,
+      candidateObservedAt: undefined,
       updatedAt: now,
     };
     if (isStartedLinearState(snapshot.state)) {

@@ -5,11 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { LeadCoordinator } from "../extensions/lead/coordinator.ts";
+import { LeadCoordinator, validationEvidenceIsComplete } from "../extensions/lead/coordinator.ts";
 import type { CommandExecutor } from "../extensions/lead/git.ts";
 import { LeadStore } from "../extensions/lead/store.ts";
 
 const execFileAsync = promisify(execFile);
+
+test("validation evidence requires at least one pass and no pending/failing checks", () => {
+  assert.equal(validationEvidenceIsComplete([]), false);
+  assert.equal(validationEvidenceIsComplete([{ name: "not applicable", status: "skipped" }]), false);
+  assert.equal(validationEvidenceIsComplete([{ name: "test", status: "passed" }, { name: "optional", status: "skipped" }]), true);
+  assert.equal(validationEvidenceIsComplete([{ name: "test", status: "passed" }, { name: "lint", status: "failed" }]), false);
+});
 
 class HarnessExecutor {
   calls: Array<{ command: string; args: string[] }> = [];
@@ -121,6 +128,20 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   assert.equal(implementation.leadObservedStatus, "running");
   assert.equal(implementation.linear?.issueIdentifier, "APP-41");
   assert.equal(implementation.linear?.status, "pending");
+  const promptClaims = await Promise.all([
+    coordinator.claimLinearLifecyclePrompt(implementation.projectId, implementation.id),
+    coordinator.claimLinearLifecyclePrompt(implementation.projectId, implementation.id),
+  ]);
+  assert.equal(promptClaims.filter(Boolean).length, 1);
+  assert.equal(await coordinator.claimLinearLifecyclePrompt(implementation.projectId, implementation.id), undefined);
+  await coordinator.updateLinearLifecycle(implementation.projectId, implementation.id, (current) => ({
+    ...current,
+    promptClaimId: undefined,
+    promptClaimedAt: undefined,
+    promptedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }));
+  assert.equal(await coordinator.claimLinearLifecyclePrompt(implementation.projectId, implementation.id), undefined);
   assert.equal(implementation.surface?.workspaceId, "workspace:2");
   assert.ok(implementation.worktreePath.startsWith(store.root));
   const launch = await readFile(implementation.launchScriptPath!, "utf8");
@@ -160,7 +181,9 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   await coordinator.markLeadObserved(implementation.projectId, implementation.id, "running");
   assert.equal((await store.requireTask(implementation.projectId, implementation.id)).leadObservedStatus, "running");
   await coordinator.markLeadObserved(implementation.projectId, implementation.id, "pr-ready-ci-pending");
-  assert.equal((await store.requireTask(implementation.projectId, implementation.id)).leadObservedStatus, "pr-ready-ci-pending");
+  const legacyMarked = await store.requireTask(implementation.projectId, implementation.id);
+  assert.equal(legacyMarked.leadObservedStatus, "pr-ready-ci-pending");
+  assert.ok(legacyMarked.leadEvents?.some((event) => event.status === "pr-ready-ci-pending" && !event.observedAt));
   harness.ci = "green";
   const unreviewedGreen = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
   assert.equal(unreviewedGreen.status, "blocked");
@@ -209,6 +232,11 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     findings: ["HEAD changed"],
   }), /diff or HEAD changed/);
   await git(implementation.worktreePath, "reset", "--hard", "HEAD^");
+  await assert.rejects(() => coordinator.report(review.projectId, review.id, {
+    reviewVerdict: "approved",
+    acceptance: implementation.brief.acceptanceCriteria.map((criterion) => ({ criterion, status: "met" as const, evidence: "" })),
+    findings: [],
+  }), /concrete evidence/);
   await coordinator.report(review.projectId, review.id, {
     reviewVerdict: "approved",
     summary: "All criteria met",

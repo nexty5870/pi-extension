@@ -12,6 +12,7 @@ import {
   normalizeLinearIssueReference,
   parseLinearIssueSnapshot,
   parseLinearWorkflowStates,
+  linearStatusFilterTeamId,
   selectLinearStartedState,
 } from "../extensions/lead/linear-lifecycle.ts";
 import type { LinearLifecycleState, TaskRecord } from "../extensions/lead/types.ts";
@@ -50,6 +51,12 @@ test("Linear issue bindings accept exact identifiers and linear.app URLs only", 
   assert.equal(normalizeLinearIssueReference("https://github.com/acme/repo/issues/41"), undefined);
 });
 
+test("Linear status evidence requires the canonical exact-team filter", () => {
+  assert.equal(linearStatusFilterTeamId({ filter: { team: { id: { eq: "team-id" } } } }), "team-id");
+  assert.equal(linearStatusFilterTeamId({ filter: { team: { id: "team-id" } } }), undefined);
+  assert.equal(linearStatusFilterTeamId({ filter: { teamId: "team-id" } }), undefined);
+});
+
 test("Linear workflow resolution is team-scoped and prefers an exact In Progress state", () => {
   const states = parseLinearWorkflowStates({ states: [
     { id: "review", name: "In Review", type: "started", position: 3, team: { id: "team-id" } },
@@ -60,6 +67,7 @@ test("Linear workflow resolution is team-scoped and prefers an exact In Progress
   const resolved = linearLifecycleAfterStatuses({ ...pending, teamId: "team-id", issueObservedAt: new Date().toISOString() }, states);
   assert.equal(resolved.candidateStateId, "progress");
   assert.equal(resolved.candidateStateName, "In Progress");
+  assert.equal(resolved.candidateTeamId, "team-id");
   assert.ok(resolved.candidateObservedAt);
 });
 
@@ -76,7 +84,10 @@ test("automatic Linear writes require the exact read-proven state and no unrelat
   const task = taskWithLinear({
     ...pending,
     candidateStateId: "progress",
+    teamId: "team-id",
+    issueObservedAt: new Date().toISOString(),
     candidateStateName: "In Progress",
+    candidateTeamId: "team-id",
     candidateObservedAt: new Date().toISOString(),
   });
   assert.equal(automaticLinearUpdateSafetyReason([task], { issue: "APP-41", stateId: "progress" }), undefined);
@@ -101,6 +112,26 @@ test("Linear lifecycle is actionable only after a durable nonterminal worker sta
   assert.equal(linearLifecycleIsActionable({ ...running, status: "completed" }), false);
   assert.equal(linearLifecycleHasPendingWriteScope(running), true);
   assert.equal(linearLifecycleHasPendingWriteScope(taskWithLinear({ ...pending, status: "unavailable" })), false);
+});
+
+test("a fresh issue read clears state evidence from an earlier team", () => {
+  const current: LinearLifecycleState = {
+    ...pending,
+    teamId: "team-a",
+    issueObservedAt: new Date().toISOString(),
+    candidateStateId: "state-a",
+    candidateStateName: "In Progress",
+    candidateTeamId: "team-a",
+    candidateObservedAt: new Date().toISOString(),
+  };
+  const changed = linearLifecycleAfterToolResult(current, "linear_get_issue", {
+    identifier: "APP-41",
+    team: { id: "team-b" },
+    state: { id: "backlog-b", name: "Backlog", type: "backlog" },
+  }, false);
+  assert.equal(changed.teamId, "team-b");
+  assert.equal(changed.candidateStateId, undefined);
+  assert.equal(changed.candidateTeamId, undefined);
 });
 
 test("Linear lifecycle requires update followed by started-state readback", () => {

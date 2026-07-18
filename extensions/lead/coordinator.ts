@@ -7,7 +7,7 @@ import { CmuxWorkers } from "./cmux.ts";
 import type { CommandExecutor, GitProject } from "./git.ts";
 import { GitWorktrees } from "./git.ts";
 import { observePullRequest } from "./github.ts";
-import { normalizeLinearIssueReference } from "./linear-lifecycle.ts";
+import { linearLifecycleIsActionable, normalizeLinearIssueReference } from "./linear-lifecycle.ts";
 import { reviewPacket, workerPrompt } from "./prompt.ts";
 import { createTaskId, LeadStore } from "./store.ts";
 import type {
@@ -88,6 +88,11 @@ export function validationEvidenceHash(checks: CheckEvidence[]): string {
     .map((check) => ({ name: check.name.trim(), status: check.status, details: check.details?.trim() || "" }))
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+export function validationEvidenceIsComplete(checks: CheckEvidence[]): boolean {
+  return checks.some((check) => check.status === "passed")
+    && checks.every((check) => check.name.trim() && check.status !== "failed" && check.status !== "pending");
 }
 
 async function privateText(path: string, content: string): Promise<void> {
@@ -304,17 +309,27 @@ export class LeadCoordinator {
     });
   }
 
+  async claimLinearLifecyclePrompt(projectId: string, taskId: string, cooldownMs = 5 * 60_000): Promise<TaskRecord | undefined> {
+    const claimId = createTaskId();
+    const claimedAt = timestamp();
+    const updated = await this.store.updateTask(projectId, taskId, (current) => {
+      if (!linearLifecycleIsActionable(current) || !current.linear) return current;
+      const existingClaim = Date.parse(current.linear.promptClaimedAt ?? "");
+      const prompted = Date.parse(current.linear.promptedAt ?? "");
+      if ((Number.isFinite(existingClaim) && Date.now() - existingClaim < cooldownMs)
+        || (Number.isFinite(prompted) && Date.now() - prompted < cooldownMs)) return current;
+      return {
+        ...current,
+        linear: { ...current.linear, promptClaimId: claimId, promptClaimedAt: claimedAt, updatedAt: claimedAt },
+      };
+    });
+    return updated.linear?.promptClaimId === claimId ? updated : undefined;
+  }
+
   async markLeadObserved(projectId: string, taskId: string, expectedStatus?: TaskStatus): Promise<TaskRecord> {
     return this.store.updateTask(projectId, taskId, (current) => {
       if (expectedStatus && current.status !== expectedStatus) return current;
-      const observedAt = timestamp();
-      return {
-        ...current,
-        leadEvents: (current.leadEvents ?? []).map((event) =>
-          event.status === current.status && !event.observedAt ? { ...event, observedAt } : event),
-        leadObservedStatus: current.status,
-        leadObservedAt: observedAt,
-      };
+      return { ...current, leadObservedStatus: current.status, leadObservedAt: timestamp() };
     });
   }
 
@@ -398,6 +413,12 @@ export class LeadCoordinator {
         throw new Error("Implementation validation evidence changed after this review started; create a fresh review worker");
       }
       const acceptance = input.acceptance ?? [];
+      if (acceptance.some((entry) => !entry.criterion.trim() || !entry.evidence.trim())) {
+        throw new Error("Every review acceptance row requires a criterion and concrete evidence");
+      }
+      if (input.reviewVerdict === "approved" && parent.brief.acceptanceCriteria.length === 0) {
+        throw new Error("An implementation cannot be approved without acceptance criteria");
+      }
       const missing = parent.brief.acceptanceCriteria.filter((criterion) =>
         !acceptance.some((entry) => normalizedCriterion(entry.criterion) === normalizedCriterion(criterion)));
       if (missing.length > 0) throw new Error(`Review acceptance matrix is missing: ${missing.join("; ")}`);
@@ -519,9 +540,9 @@ export class LeadCoordinator {
       } else if (task.review.checksHash !== validationEvidenceHash(task.checks)) {
         status = "blocked";
         blockedReason = "Validation evidence changed after independent review";
-      } else if (task.checks.length === 0 || task.checks.some((check) => check.status === "failed" || check.status === "pending")) {
+      } else if (!validationEvidenceIsComplete(task.checks)) {
         status = "blocked";
-        blockedReason = "Independent review lacks complete passing validation evidence";
+        blockedReason = "Independent review lacks at least one passing check and complete non-failing validation evidence";
       } else if (currentDiff.headSha !== observation.headSha) {
         status = "blocked";
         blockedReason = "The pull request head does not match the reviewed worker HEAD";

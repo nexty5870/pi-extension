@@ -37,8 +37,10 @@ test("GitHub observations distinguish pending, failed, green, and merged", () =>
   assert.equal(classifyPullRequest({
     url: open.url,
     state: "MERGED",
+    headRefOid: "abc123",
     statusCheckRollup: [],
   }).status, "merged");
+  assert.equal(classifyPullRequest({ url: open.url, state: "MERGED", statusCheckRollup: [] }).status, "pending");
   assert.equal(classifyPullRequest({ ...open, statusCheckRollup: [] }).status, "green");
   assert.equal(classifyPullRequest({ ...open, isDraft: true, statusCheckRollup: [] }).status, "pending");
   assert.equal(classifyPullRequest({
@@ -57,6 +59,9 @@ test("V2 gates only clear dangerous boundaries instead of disabling normal shell
   assert.equal(classifyBashRisk("git push --force-with-lease origin pi/task"), "force-push");
   assert.equal(classifyBashRisk("git -C /tmp/repo push -f origin pi/task"), "force-push");
   assert.equal(classifyBashRisk("git push origin +HEAD:main"), "force-push");
+  assert.equal(classifyBashRisk("git push origin '+HEAD:main'"), "force-push");
+  assert.equal(classifyBashRisk("git push origin main; git push --force origin main"), "force-push");
+  assert.equal(classifyBashRisk("git push origin $REFSPEC"), "force-push");
   assert.equal(classifyBashRisk("gh pr merge 42 --squash"), "merge");
   assert.equal(classifyBashRisk("kubectl apply -f prod.yaml"), "deployment");
   assert.equal(classifyBashRisk("pnpm run deploy"), "deployment");
@@ -76,6 +81,9 @@ test("credential stores and real env files stay protected while templates remain
   assert.match(sensitiveCommandReason("cat ~/.ssh/id_ed25519", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("printenv", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("printenv OPENAI_API_KEY", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("sh -c printenv", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("bash -c env", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("/bin/sh -c env", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("env | sort", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("env -0", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("export", "/home/operator") ?? "", /credential/);
@@ -105,4 +113,6 @@ test("review and research shell is an explicit read-only allowlist", () => {
   assert.match(readOnlyWorkerCommandReason("GIT_EXTERNAL_DIFF='touch x' git diff") ?? "", /read-only|environment overrides/);
   assert.match(readOnlyWorkerCommandReason("command rm -f file") ?? "", /read-only|command -v/);
   assert.match(readOnlyWorkerCommandReason("find . -fprint output.txt") ?? "", /find/);
+  assert.match(readOnlyWorkerCommandReason("echo ok\nchmod 777 target") ?? "", /chmod/);
+  assert.match(readOnlyWorkerCommandReason("echo ok & chmod 777 target") ?? "", /chmod/);
 });

@@ -16,6 +16,7 @@ import {
   normalizeLinearIssueReference,
   parseLinearIssueSnapshot,
   parseLinearWorkflowStates,
+  linearStatusFilterTeamId,
 } from "./linear-lifecycle.ts";
 import { LEAD_SYSTEM_PROMPT } from "./prompt.ts";
 import {
@@ -132,13 +133,20 @@ export default function leadExtension(pi: ExtensionAPI) {
   const queueLinearLifecycle = async (task: TaskRecord, deliverAs: "steer" | "followUp"): Promise<{ task: TaskRecord; note: string }> => {
     if (!linearLifecycleIsActionable(task) || linearPromptsInFlight.has(task.id)) return { task, note: "" };
     linearPromptsInFlight.add(task.id);
-    const activeTools = new Set(pi.getActiveTools());
-    const missing = LINEAR_START_TOOLS.filter((tool) => !activeTools.has(tool));
-    if (missing.length > 0) {
-      try {
+    let claimId: string | undefined;
+    try {
+      const claimed = await coordinator.claimLinearLifecyclePrompt(task.projectId, task.id);
+      if (!claimed?.linear?.promptClaimId) return { task, note: " Linear lifecycle sync is already queued by another Lead session." };
+      task = claimed;
+      claimId = claimed.linear.promptClaimId;
+      const activeTools = new Set(pi.getActiveTools());
+      const missing = LINEAR_START_TOOLS.filter((tool) => !activeTools.has(tool));
+      if (missing.length > 0) {
         const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
           ...current,
           status: "unavailable",
+          promptClaimId: current.promptClaimId === claimId ? undefined : current.promptClaimId,
+          promptClaimedAt: current.promptClaimId === claimId ? undefined : current.promptClaimedAt,
           lastError: `Required pi-linear tools are disabled: ${missing.join(", ")}`,
           updatedAt: new Date().toISOString(),
         }));
@@ -146,16 +154,12 @@ export default function leadExtension(pi: ExtensionAPI) {
           task: updated,
           note: ` Linear lifecycle was not changed because required pi-linear tools are disabled (${missing.join(", ")}); worker startup continues.`,
         };
-      } finally {
-        linearPromptsInFlight.delete(task.id);
       }
-    }
-    try {
       pi.sendMessage({
         customType: "lead:linear-lifecycle",
         content: linearStartInstruction(task),
         display: true,
-        details: { taskId: task.id, issueIdentifier: task.linear!.issueIdentifier },
+        details: { taskId: task.id, issueIdentifier: task.linear!.issueIdentifier, claimId },
       }, { deliverAs, triggerTurn: true });
       const now = new Date().toISOString();
       const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
@@ -166,9 +170,12 @@ export default function leadExtension(pi: ExtensionAPI) {
         issueObservedAt: current.status === "verifying" ? current.issueObservedAt : undefined,
         candidateStateId: current.status === "verifying" ? current.candidateStateId : undefined,
         candidateStateName: current.status === "verifying" ? current.candidateStateName : undefined,
+        candidateTeamId: current.status === "verifying" ? current.candidateTeamId : undefined,
         candidateObservedAt: current.status === "verifying" ? current.candidateObservedAt : undefined,
         promptedAt: now,
         promptCount: (current.promptCount ?? 0) + 1,
+        promptClaimId: current.promptClaimId === claimId ? undefined : current.promptClaimId,
+        promptClaimedAt: current.promptClaimId === claimId ? undefined : current.promptClaimedAt,
         lastError: undefined,
         updatedAt: now,
       }));
@@ -180,6 +187,8 @@ export default function leadExtension(pi: ExtensionAPI) {
       const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
         ...current,
         status: current.status === "verifying" ? "verifying" : "pending",
+        promptClaimId: current.promptClaimId === claimId ? undefined : current.promptClaimId,
+        promptClaimedAt: current.promptClaimId === claimId ? undefined : current.promptClaimedAt,
         lastError: error instanceof Error ? error.message : String(error),
         updatedAt: new Date().toISOString(),
       }));
@@ -367,12 +376,14 @@ export default function leadExtension(pi: ExtensionAPI) {
     const tasks = await coordinator.list(dashboardProjectId);
     if (event.toolName === "linear_list_issue_statuses") {
       if (event.isError) return;
-      const states = parseLinearWorkflowStates(event.details, event.content);
-      for (const teamId of new Set(states.map((state) => state.team?.id).filter((id): id is string => Boolean(id)))) {
-        linearStatesByTeam.set(teamId, { states, observedAt: Date.now() });
-      }
+      const filterTeamId = linearStatusFilterTeamId(event.input);
+      if (!filterTeamId) return;
+      const states = parseLinearWorkflowStates(event.details, event.content)
+        .filter((state) => state.team?.id === filterTeamId);
+      if (states.length === 0) return;
+      linearStatesByTeam.set(filterTeamId, { states, observedAt: Date.now() });
       for (const task of tasks.filter((candidate) =>
-        candidate.linear?.status !== "in-progress" && states.some((state) => state.team?.id === candidate.linear?.teamId))) {
+        candidate.linear?.status !== "in-progress" && candidate.linear?.teamId === filterTeamId)) {
         await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
           linearLifecycleAfterStatuses(current, states));
       }
@@ -417,7 +428,7 @@ export default function leadExtension(pi: ExtensionAPI) {
       );
       if (reason) return { block: true, reason };
     }
-    if (["read", "write", "edit"].includes(event.toolName)) {
+    if (["read", "write", "edit", "grep", "find", "ls"].includes(event.toolName)) {
       const input = event.input as { path?: unknown; file_path?: unknown };
       const path = typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : undefined;
       if (path) {
@@ -546,7 +557,6 @@ export default function leadExtension(pi: ExtensionAPI) {
           blockedReason: params.reason,
           summary: params.summary ?? params.reason,
         }, signal);
-        await coordinator.markLeadObserved(context.record.projectId, updated.id, updated.status);
         await updateDashboard(false);
         return textResult(`${updated.id.slice(0, 8)}: ${updated.status}`, { task: updated });
       },
@@ -560,7 +570,6 @@ export default function leadExtension(pi: ExtensionAPI) {
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         const context = await coordinator.project({ cwd: ctx.cwd, signal });
         const task = await coordinator.refreshPullRequest(context.record.projectId, params.taskId, signal);
-        await coordinator.markLeadObserved(context.record.projectId, task.id, task.status);
         await updateDashboard(false);
         return textResult(`${task.id.slice(0, 8)}: ${task.status}${task.blockedReason ? ` — ${task.blockedReason}` : ""}`, { task });
       },

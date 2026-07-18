@@ -85,7 +85,7 @@ Normal Pi tools remain active. A narrow tool hook protects only clear boundaries
 - force-push is blocked;
 - PR merge, deployment, production/cloud mutation, and destructive commands require an interactive one-command confirmation;
 - destructive Linear tools and agent-driven workspace switching are blocked;
-- known credential stores and real `.env` files are blocked;
+- known credential stores, resolved symlink targets, real `.env` files, and environment dumps are blocked across file-search and shell tools;
 - research/review workers cannot use edit/write and bash is restricted to an explicit read-only command allowlist.
 
 This is a coordination boundary, not an operating-system sandbox. Use containers or OS isolation for untrusted repositories.
@@ -104,7 +104,7 @@ When an implementation is backed by Linear, `lead_delegate.linearIssue` stores a
 4. updates only that issue's `stateId` through `linear_update_issue`;
 5. reads the issue again and records success only after state type `started` is confirmed.
 
-The update runs in the Lead session only after a durable successful worker launch; failed, stopped, or terminal workers are not resumed into In Progress. Automatic writes are temporarily scoped to the pending bound issue and exact read-proven state ID. Workers remain unable to mutate Linear. The binding is omitted for local/GitHub-only tasks. Disabled pi-linear tools, absent auth, and API/schema failures do not stop the worker or consume the desired lifecycle action: state remains visible as `pending`/`unavailable` and can be retried while the worker remains active. Deletes, archive operations, and workspace switching remain outside the extension boundary.
+The update runs in the Lead session only after a durable successful worker launch; failed, stopped, or terminal workers are not resumed into In Progress. Prompt issuance uses a persisted cross-session claim and cooldown. Automatic writes are temporarily scoped to the pending bound issue and an unexpired state ID bound to the latest exact-team issue/status reads. Workers remain unable to mutate Linear. The binding is omitted for local/GitHub-only tasks. Disabled pi-linear tools, absent auth, and API/schema failures do not stop the worker or consume the desired lifecycle action: state remains visible as `pending`/`unavailable` and can be retried while the worker remains active. Deletes, archive operations, and workspace switching remain outside the extension boundary.
 
 ## Local validation
 

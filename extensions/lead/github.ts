@@ -53,6 +53,9 @@ export function classifyPullRequest(payload: PullRequestPayload, fallbackUrl = "
 
   const pullRequestState = normalized(payload.state);
   if (pullRequestState === "MERGED") {
+    if (!payload.headRefOid?.trim() || payload.statusCheckRollup == null) {
+      return { status: "pending", url, headSha: payload.headRefOid, mergeState: payload.mergeStateStatus, checks, reason: "GitHub merged state is missing head or check evidence" };
+    }
     return { status: "merged", url, headSha: payload.headRefOid, mergeState: payload.mergeStateStatus, checks };
   }
   if (pullRequestState === "CLOSED") {

@@ -10,8 +10,13 @@ function compact(command: string): string {
 
 export function classifyBashRisk(command: string): BashRisk | undefined {
   const value = compact(command);
-  const pushArguments = value.match(/\bgit(?:\s+(?:-C|-c)\s+\S+)*\s+push\b([^;&|]*)/i)?.[1] ?? "";
-  if (/--force(?:-with-lease|-if-includes)?|(?:^|\s)-f(?:\s|$)|(?:^|\s)\+\S+/i.test(pushArguments)) return "force-push";
+  const pushCommands = [...value.matchAll(/\bgit(?:\s+(?:-C|-c)\s+\S+)*\s+push\b([^;&|]*)/gi)];
+  if (pushCommands.some((match) => {
+    const original = match[1];
+    const args = original.replace(/["']/g, "").replace(/\\(?=\+)/g, "");
+    return /--force(?:-with-lease|-if-includes)?|(?:^|\s)-f(?:\s|$)|(?:^|\s)\$*\+\S+/i.test(args)
+      || /\$(?:\{|\(|[A-Za-z_])/.test(original);
+  })) return "force-push";
   if (/\bgh\s+pr\s+merge\b|\bgh\s+api\b[^\n]*\/merge(?:\s|$)/i.test(value)) return "merge";
   if (/\b(?:kubectl\s+(?:apply|delete|patch|replace|edit|scale)|helm\s+(?:install|upgrade|uninstall|rollback)|terraform\s+(?:apply|destroy)|pulumi\s+(?:up|destroy)|fly(?:ctl)?\s+deploy|vercel\b[^\n]*--prod|railway\s+up|serverless\s+deploy|sam\s+deploy|cdk\s+deploy|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?deploy(?::[\w-]+)?|(?:make|just)\s+deploy)\b/i.test(value)) {
     return "deployment";
@@ -48,8 +53,9 @@ export function sensitiveCommandReason(command: string, home = homedir()): strin
     while (args[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[0])) args.shift();
     return args.length === 0 || args[0].startsWith("-");
   });
-  if (/(?:^|[;&|]\s*)printenv(?:\s|$)/i.test(value)
+  if (/\bprintenv\b/i.test(value)
     || /(?:^|[;&|]\s*)(?:set|export(?:\s+-p)?|declare\s+-x|typeset\s+-x)\s*(?:$|[|>])/i.test(value)
+    || /(?:^|\s)(?:\S*\/)?(?:bash|sh|zsh)\s+-c\s+[^;&|]*\b(?:env|set|export)\b/i.test(value)
     || environmentDump
     || /\$(?:\{)?[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:\})?/i.test(value)) {
     return "commands that print credential-bearing environment values are blocked";
@@ -107,14 +113,18 @@ function commandName(segment: string): string | undefined {
 }
 
 export function readOnlyWorkerCommandReason(command: string): string | undefined {
-  const value = compact(command);
+  const value = command
+    .replace(/\\\r?\n/g, " ")
+    .replace(/\r?\n/g, ";")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!value) return undefined;
   if (reviewMutationPattern(value)) return "review/research worker shell commands must be read-only";
   if (/(?:^|&&|\|\||[;|])\s*[A-Za-z_][A-Za-z0-9_]*=/.test(value)) return "environment overrides are not allowed in read-only worker shell commands";
   if (/\$\(|`|<\(|>\(/.test(value)) return "command substitution is not allowed in read-only worker shell commands";
   if (/\bfind\b[^;&|]*(?:-delete|-exec(?:dir)?|-ok(?:dir)?|-f(?:print|printf|ls))\b/i.test(value)) return "mutating find actions are not allowed in read-only workers";
   if (/\b(?:sort|diff)\b[^;&|]*(?:\s-o(?:\S+|\s)|--output(?:=|\s))/i.test(value)) return "output files are not allowed in read-only workers";
-  const segments = value.split(/&&|\|\||[;|]/).map((part) => part.trim()).filter(Boolean);
+  const segments = value.split(/&&|\|\||[;&|]/).map((part) => part.trim()).filter(Boolean);
   for (const segment of segments) {
     const name = commandName(segment);
     if (!name || !READ_ONLY_COMMANDS.has(name)) return `command ${name ?? "(unknown)"} is not in the read-only worker shell allowlist`;
