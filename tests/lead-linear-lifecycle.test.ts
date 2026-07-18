@@ -57,9 +57,10 @@ test("Linear workflow resolution is team-scoped and prefers an exact In Progress
     { id: "progress", name: "In Progress", type: "started", position: 1, team: { id: "team-id" } },
   ] }, []);
   assert.equal(selectLinearStartedState(states, "team-id")?.id, "progress");
-  const resolved = linearLifecycleAfterStatuses({ ...pending, teamId: "team-id" }, states);
+  const resolved = linearLifecycleAfterStatuses({ ...pending, teamId: "team-id", issueObservedAt: new Date().toISOString() }, states);
   assert.equal(resolved.candidateStateId, "progress");
   assert.equal(resolved.candidateStateName, "In Progress");
+  assert.ok(resolved.candidateObservedAt);
 });
 
 test("Linear workflow resolution refuses ambiguous custom started states", () => {
@@ -68,19 +69,28 @@ test("Linear workflow resolution refuses ambiguous custom started states", () =>
     { id: "review", name: "Review", type: "started", team: { id: "team-id" } },
   ] }, []);
   assert.equal(selectLinearStartedState(states, "team-id"), undefined);
-  assert.match(linearLifecycleAfterStatuses({ ...pending, teamId: "team-id" }, states).lastError ?? "", /No unambiguous/);
+  assert.match(linearLifecycleAfterStatuses({ ...pending, teamId: "team-id", issueObservedAt: new Date().toISOString() }, states).lastError ?? "", /No unambiguous/);
 });
 
 test("automatic Linear writes require the exact read-proven state and no unrelated fields", () => {
-  const task = taskWithLinear({ ...pending, candidateStateId: "progress", candidateStateName: "In Progress" });
+  const task = taskWithLinear({
+    ...pending,
+    candidateStateId: "progress",
+    candidateStateName: "In Progress",
+    candidateObservedAt: new Date().toISOString(),
+  });
   assert.equal(automaticLinearUpdateSafetyReason([task], { issue: "APP-41", stateId: "progress" }), undefined);
   assert.match(automaticLinearUpdateSafetyReason([task], { issue: "APP-41", stateId: "other" }) ?? "", /read-proven/);
   assert.match(automaticLinearUpdateSafetyReason([task], { issue: "APP-41", stateId: "progress", title: "changed" }) ?? "", /only stateId/);
-  assert.match(automaticLinearUpdateSafetyReason([taskWithLinear()], { issue: "APP-41", stateId: "progress" }) ?? "", /no single read-proven/);
+  assert.match(automaticLinearUpdateSafetyReason([taskWithLinear()], { issue: "APP-41", stateId: "progress" }) ?? "", /no single.*read-proven/);
+  const stale = taskWithLinear({ ...task.linear!, candidateObservedAt: new Date(0).toISOString() });
+  assert.match(automaticLinearUpdateSafetyReason([stale], { issue: "APP-41", stateId: "progress" }) ?? "", /again/);
   assert.match(automaticLinearUpdateSafetyReason([task], { issue: "OTHER-1", stateId: "other" }) ?? "", /unrelated/);
   assert.match(linearLifecycleMutationSafetyReason([task], "linear_create_issue", { title: "unrelated" }) ?? "", /only the bound issue/);
   const unavailable = taskWithLinear({ ...pending, status: "unavailable" });
   assert.equal(linearLifecycleMutationSafetyReason([unavailable], "linear_create_issue", { title: "normal admin" }), undefined);
+  const verifying = taskWithLinear({ ...task.linear!, status: "verifying" });
+  assert.match(linearLifecycleMutationSafetyReason([verifying], "linear_update_issue", { issue: "APP-41", stateId: "progress" }) ?? "", /readback/);
 });
 
 test("Linear lifecycle is actionable only after a durable nonterminal worker start", () => {

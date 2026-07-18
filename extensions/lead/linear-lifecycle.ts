@@ -119,7 +119,8 @@ export function linearLifecycleAfterStatuses(
   states: LinearWorkflowStateSnapshot[],
 ): LinearLifecycleState {
   const now = new Date().toISOString();
-  if (!current.teamId) {
+  const issueObserved = Date.parse(current.issueObservedAt ?? "");
+  if (!current.teamId || !Number.isFinite(issueObserved) || Date.now() - issueObserved >= 5 * 60_000) {
     return { ...current, lastError: "Read the Linear issue and canonical team before resolving In Progress", updatedAt: now };
   }
   const candidate = selectLinearStartedState(states, current.teamId);
@@ -128,6 +129,7 @@ export function linearLifecycleAfterStatuses(
       ...current,
       candidateStateId: undefined,
       candidateStateName: undefined,
+      candidateObservedAt: undefined,
       lastError: "No unambiguous In Progress workflow state was returned for the issue team",
       updatedAt: now,
     };
@@ -136,6 +138,7 @@ export function linearLifecycleAfterStatuses(
     ...current,
     candidateStateId: candidate.id,
     candidateStateName: candidate.name,
+    candidateObservedAt: now,
     lastError: undefined,
     updatedAt: now,
   };
@@ -166,12 +169,19 @@ export function automaticLinearUpdateSafetyReason(
   if (lifecycleTasks.length === 0) {
     return `Automatic Linear start is scoped to ${pending.map((task) => task.linear?.issueIdentifier).join(", ")}; ${identifier} is unrelated.`;
   }
+  if (lifecycleTasks.every((task) => task.linear?.status === "verifying")) {
+    return `The state write for ${identifier} already succeeded; call linear_get_issue for readback instead of writing again.`;
+  }
   const fields = Object.keys(input).filter((key) => input[key] !== undefined);
   const extraFields = fields.filter((key) => key !== "issue" && key !== "stateId");
   if (extraFields.length > 0) {
     return `Automatic Linear start may update only stateId; remove: ${extraFields.join(", ")}.`;
   }
   const candidateIds = new Set(lifecycleTasks
+    .filter((task) => {
+      const observed = Date.parse(task.linear?.candidateObservedAt ?? "");
+      return Number.isFinite(observed) && Date.now() - observed < 5 * 60_000;
+    })
     .map((task) => task.linear?.candidateStateId)
     .filter((id): id is string => Boolean(id)));
   if (candidateIds.size !== 1) {
@@ -247,6 +257,7 @@ export function linearLifecycleAfterToolResult(
       ...current,
       issueId: snapshot.id,
       teamId: snapshot.team?.id,
+      issueObservedAt: now,
       stateId: snapshot.state?.id,
       stateName: snapshot.state?.name,
       updatedAt: now,

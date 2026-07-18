@@ -107,10 +107,12 @@ export interface LinearLifecycleState {
   attempts: number;
   issueId?: string;
   teamId?: string;
+  issueObservedAt?: string;
   stateId?: string;
   stateName?: string;
   candidateStateId?: string;
   candidateStateName?: string;
+  candidateObservedAt?: string;
   writeObservedAt?: string;
   verifiedAt?: string;
   promptedAt?: string;

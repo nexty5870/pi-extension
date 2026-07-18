@@ -161,8 +161,12 @@ export default function leadExtension(pi: ExtensionAPI) {
       const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
         ...current,
         status: current.status === "verifying" ? "verifying" : "pending",
+        issueId: current.status === "verifying" ? current.issueId : undefined,
+        teamId: current.status === "verifying" ? current.teamId : undefined,
+        issueObservedAt: current.status === "verifying" ? current.issueObservedAt : undefined,
         candidateStateId: current.status === "verifying" ? current.candidateStateId : undefined,
         candidateStateName: current.status === "verifying" ? current.candidateStateName : undefined,
+        candidateObservedAt: current.status === "verifying" ? current.candidateObservedAt : undefined,
         promptedAt: now,
         promptCount: (current.promptCount ?? 0) + 1,
         lastError: undefined,
