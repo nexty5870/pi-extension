@@ -27,13 +27,12 @@ Use `lead_workers` to reconcile state, `lead_update_worker` after direct operato
 
 Workers call `lead_worker_report` at meaningful transitions. Those transitions wake the persistent Lead automatically; continue the existing operator request from the handoff instead of waiting for another prompt:
 
-- `running`
 - `blocked` with a concrete reason
 - `pr-ready-ci-pending`
 - `pr-ready-ci-green`
 - `completed`, `failed`, or `merged`
 
-Reports should include validation checks, PR URL/commit when available, a concise handoff, and—on review workers—verdict, findings, and an acceptance matrix.
+Reports should include validation checks, PR URL/commit when available, a concise handoff, and—on review workers—verdict, findings, and an acceptance matrix. Initial `running` is persisted but does not wake the Lead because the delegation turn already has that result.
 
 ## Boundaries
 

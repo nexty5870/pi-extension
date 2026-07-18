@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { ProjectRecord, TaskRecord } from "./types.ts";
+import { LEAD_EVENT_STATUSES, type LeadTaskEvent, type ProjectRecord, type TaskRecord } from "./types.ts";
 
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 5_000;
@@ -11,6 +11,31 @@ const STALE_LOCK_MS = 30_000;
 
 function now(): string {
   return new Date().toISOString();
+}
+
+const leadEventStatuses = new Set<string>(LEAD_EVENT_STATUSES);
+
+function appendLeadEvent(current: TaskRecord, next: TaskRecord, createdAt: string): TaskRecord {
+  const statusChanged = current.status !== next.status && leadEventStatuses.has(next.status);
+  const reviewChanged = current.review?.reviewedAt !== next.review?.reviewedAt && Boolean(next.review);
+  if (!statusChanged && !reviewChanged) return next;
+  const event: LeadTaskEvent = {
+    id: randomUUID(),
+    kind: statusChanged ? "status" : "review",
+    status: next.status,
+    createdAt,
+    blockedReason: next.blockedReason,
+    summary: next.summary,
+    handoff: next.handoff,
+    review: next.review,
+    pullRequestUrl: next.pullRequest?.url,
+    linear: next.linear ? {
+      issueIdentifier: next.linear.issueIdentifier,
+      status: next.linear.status,
+      stateName: next.linear.stateName,
+    } : undefined,
+  };
+  return { ...next, leadEvents: [...(next.leadEvents ?? current.leadEvents ?? []), event] };
 }
 
 export function projectIdForRoot(projectRoot: string): string {
@@ -190,7 +215,8 @@ export class LeadStore {
     const path = this.taskPath(projectId, taskId);
     return withFileLock(path, async () => {
       const current = await readJson<TaskRecord>(path);
-      const next = { ...(await update(current)), updatedAt: now() };
+      const updatedAt = now();
+      const next = appendLeadEvent(current, { ...(await update(current)), updatedAt }, updatedAt);
       await atomicJson(path, next);
       return next;
     });

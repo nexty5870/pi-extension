@@ -117,6 +117,7 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     acceptanceCriteria: ["Every imported record has an owner", "Parent records are synchronized", "Malformed input has regression coverage"],
   }, runtime);
   assert.equal(implementation.status, "running");
+  assert.ok(implementation.workerStartedAt);
   assert.equal(implementation.leadObservedStatus, "running");
   assert.equal(implementation.linear?.issueIdentifier, "APP-41");
   assert.equal(implementation.linear?.status, "pending");
@@ -189,7 +190,7 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     reviewVerdict: "changes-requested",
     acceptance: implementation.brief.acceptanceCriteria.map((criterion) => ({ criterion, status: "not-met" as const, evidence: "diff moved" })),
     findings: ["Diff changed during review"],
-  }), /diff changed/);
+  }), /diff or HEAD changed/);
   await writeFile(join(implementation.worktreePath, "feature.ts"), "export const enabled = true;\n");
 
   await assert.rejects(() => coordinator.report(review.projectId, review.id, {
@@ -201,6 +202,13 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     })),
     findings: [],
   }), /approved review cannot/);
+  await git(implementation.worktreePath, "commit", "--allow-empty", "-m", "metadata-only change");
+  await assert.rejects(() => coordinator.report(review.projectId, review.id, {
+    reviewVerdict: "changes-requested",
+    acceptance: implementation.brief.acceptanceCriteria.map((criterion) => ({ criterion, status: "not-met" as const, evidence: "HEAD moved" })),
+    findings: ["HEAD changed"],
+  }), /diff or HEAD changed/);
+  await git(implementation.worktreePath, "reset", "--hard", "HEAD^");
   await coordinator.report(review.projectId, review.id, {
     reviewVerdict: "approved",
     summary: "All criteria met",
@@ -216,4 +224,13 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   harness.ci = "green";
   const green = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
   assert.equal(green.status, "pr-ready-ci-green");
+
+  const evidenceChanged = await coordinator.report(implementation.projectId, implementation.id, {
+    status: "pr-ready-ci-pending",
+    checks: [{ name: "npm test", status: "passed", details: "43 tests" }],
+  });
+  assert.equal(evidenceChanged.review, undefined);
+  const staleEvidence = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
+  assert.equal(staleEvidence.status, "blocked");
+  assert.match(staleEvidence.blockedReason ?? "", /independent review/);
 });

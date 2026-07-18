@@ -4,20 +4,30 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { LeadCoordinator, summarizeTasks, workerLabel } from "./coordinator.ts";
-import { isActionableWorkerState, pendingLeadEvents, workerEventMessage } from "./events.ts";
+import { deliveredLeadEventIds, isActionableWorkerState, pendingLeadEvents, workerEventMessage } from "./events.ts";
 import type { CommandExecutor } from "./git.ts";
 import {
   LINEAR_START_TOOLS,
-  automaticLinearUpdateSafetyReason,
   linearLifecycleAfterStatuses,
   linearLifecycleAfterToolResult,
+  linearLifecycleIsActionable,
+  linearLifecycleMutationSafetyReason,
   linearStartInstruction,
   normalizeLinearIssueReference,
   parseLinearIssueSnapshot,
   parseLinearWorkflowStates,
 } from "./linear-lifecycle.ts";
 import { LEAD_SYSTEM_PROMPT } from "./prompt.ts";
-import { classifyBashRisk, isDestructiveLinearTool, isLinearMutationTool, riskDescription, sensitiveCommandReason, sensitivePathReason } from "./safety.ts";
+import {
+  classifyBashRisk,
+  isDestructiveLinearTool,
+  isLinearMutationTool,
+  readOnlyWorkerCommandReason,
+  riskDescription,
+  sensitiveCommandReason,
+  sensitiveCommandResolvedPathReason,
+  sensitiveResolvedPathReason,
+} from "./safety.ts";
 import { defaultLeadStateDir, LeadStore } from "./store.ts";
 import { TASK_STATUSES, type TaskRecord, type WorkerRole } from "./types.ts";
 
@@ -75,11 +85,6 @@ function workerRolePrompt(taskId: string, role: string): string {
   return `You are the visible ${role} worker for Lead task ${taskId}. Your assignment is in the appended system prompt. Use normal Pi tools within that scope. Keep the Lead informed with lead_worker_report. Never merge, deploy, force-push, expose credentials, or mutate unrelated external resources without separate direct operator authorization.`;
 }
 
-function reviewCommandAppearsMutating(command: string): boolean {
-  const value = command.replace(/\\\n/g, " ");
-  return /(?:^|[;&|]\s*|\b)(?:rm|mv|cp|touch|mkdir|rmdir|truncate|install)\b|\bsed\s+-i\b|\bperl\s+-p?i\b|\bgit\s+(?:add|commit|checkout|switch|reset|clean|restore|rebase|cherry-pick)\b|(?:^|[^<])>{1,2}(?!>)/i.test(value);
-}
-
 function textResult(text: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: "text" as const, text }], details };
 }
@@ -121,34 +126,42 @@ export default function leadExtension(pi: ExtensionAPI) {
   let inboxTimer: ReturnType<typeof setInterval> | undefined;
   let inboxContext: ExtensionContext | undefined;
   let inboxRunning = false;
+  const linearPromptsInFlight = new Set<string>();
 
   const queueLinearLifecycle = async (task: TaskRecord, deliverAs: "steer" | "followUp"): Promise<{ task: TaskRecord; note: string }> => {
-    if (!task.linear || task.linear.status === "in-progress") return { task, note: "" };
+    if (!linearLifecycleIsActionable(task) || linearPromptsInFlight.has(task.id)) return { task, note: "" };
+    linearPromptsInFlight.add(task.id);
     const activeTools = new Set(pi.getActiveTools());
     const missing = LINEAR_START_TOOLS.filter((tool) => !activeTools.has(tool));
     if (missing.length > 0) {
-      const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
-        ...current,
-        status: "unavailable",
-        lastError: `Required pi-linear tools are disabled: ${missing.join(", ")}`,
-        updatedAt: new Date().toISOString(),
-      }));
-      return {
-        task: updated,
-        note: ` Linear lifecycle was not changed because required pi-linear tools are disabled (${missing.join(", ")}); worker startup continues.`,
-      };
+      try {
+        const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
+          ...current,
+          status: "unavailable",
+          lastError: `Required pi-linear tools are disabled: ${missing.join(", ")}`,
+          updatedAt: new Date().toISOString(),
+        }));
+        return {
+          task: updated,
+          note: ` Linear lifecycle was not changed because required pi-linear tools are disabled (${missing.join(", ")}); worker startup continues.`,
+        };
+      } finally {
+        linearPromptsInFlight.delete(task.id);
+      }
     }
     try {
       pi.sendMessage({
         customType: "lead:linear-lifecycle",
         content: linearStartInstruction(task),
         display: true,
-        details: { taskId: task.id, issueIdentifier: task.linear.issueIdentifier },
+        details: { taskId: task.id, issueIdentifier: task.linear!.issueIdentifier },
       }, { deliverAs, triggerTurn: true });
       const now = new Date().toISOString();
       const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
         ...current,
         status: current.status === "verifying" ? "verifying" : "pending",
+        candidateStateId: current.status === "verifying" ? current.candidateStateId : undefined,
+        candidateStateName: current.status === "verifying" ? current.candidateStateName : undefined,
         promptedAt: now,
         promptCount: (current.promptCount ?? 0) + 1,
         lastError: undefined,
@@ -166,13 +179,19 @@ export default function leadExtension(pi: ExtensionAPI) {
         updatedAt: new Date().toISOString(),
       }));
       return { task: updated, note: " Linear lifecycle sync remains pending; worker startup is not blocked." };
+    } finally {
+      linearPromptsInFlight.delete(task.id);
     }
   };
 
   const resumePendingLinearLifecycle = async () => {
     if (!dashboardProjectId) return;
     const tasks = await coordinator.list(dashboardProjectId);
-    for (const task of tasks.filter((candidate) => candidate.linear && candidate.linear.status !== "in-progress")) {
+    for (const task of tasks.filter((candidate) => {
+      if (!linearLifecycleIsActionable(candidate)) return false;
+      const prompted = Date.parse(candidate.linear?.promptedAt ?? "");
+      return !Number.isFinite(prompted) || Date.now() - prompted > 1_000;
+    })) {
       await queueLinearLifecycle(task, "followUp");
     }
   };
@@ -197,26 +216,38 @@ export default function leadExtension(pi: ExtensionAPI) {
       );
 
       const unobserved = tasks.filter((task) => task.leadObservedStatus !== task.status);
-      const actionable = pendingLeadEvents(tasks);
+      let actionable = pendingLeadEvents(tasks);
+      const delivered = deliveredLeadEventIds(dashboardContext.sessionManager.getEntries());
+      const recovered = actionable.filter(({ event }) => delivered.has(event.id));
+      for (const { task, event } of recovered) {
+        await coordinator.markLeadEventsObserved(dashboardProjectId, task.id, [event.id]);
+      }
+      actionable = actionable.filter(({ event }) => !delivered.has(event.id));
       for (const task of unobserved.filter((candidate) => !isActionableWorkerState(candidate.status))) {
         await coordinator.markLeadObserved(dashboardProjectId, task.id, task.status);
       }
 
-      if (emitEvents && actionable.length > 0) {
-        for (const task of actionable) {
+      if (emitEvents && actionable.length > 0 && dashboardContext.isIdle()) {
+        const batch = actionable.slice(0, 1);
+        for (const { task, event } of batch) {
           dashboardContext.ui.notify(
-            `${task.brief.title}: ${task.status}${task.blockedReason ? ` — ${task.blockedReason}` : ""}`,
-            task.status === "blocked" || task.status === "failed" ? "warning" : "info",
+            `${task.brief.title}: ${event.status}${event.blockedReason ? ` — ${event.blockedReason}` : ""}`,
+            event.status === "blocked" || event.status === "failed" ? "warning" : "info",
           );
         }
+        const eventIds = batch.map(({ event }) => event.id);
         pi.sendMessage({
           customType: "lead:worker-event",
-          content: workerEventMessage(actionable),
+          content: workerEventMessage(batch),
           display: true,
-          details: { taskIds: actionable.map((task) => task.id) },
+          details: { eventIds, taskIds: [...new Set(batch.map(({ task }) => task.id))] },
         }, { deliverAs: "followUp", triggerTurn: true });
-        for (const task of actionable) {
-          await coordinator.markLeadObserved(dashboardProjectId, task.id, task.status);
+        const eventsByTask = new Map<string, string[]>();
+        for (const { task, event } of batch) {
+          eventsByTask.set(task.id, [...(eventsByTask.get(task.id) ?? []), event.id]);
+        }
+        for (const [taskId, ids] of eventsByTask) {
+          await coordinator.markLeadEventsObserved(dashboardProjectId, taskId, ids);
         }
       }
     } finally {
@@ -362,9 +393,11 @@ export default function leadExtension(pi: ExtensionAPI) {
     if (isWorker && isLinearMutationTool(event.toolName)) {
       return { block: true, reason: "Worker sessions cannot mutate Linear; report the requested tracking change to the Lead." };
     }
-    if (!isWorker && dashboardProjectId && event.toolName === "linear_update_issue") {
-      const reason = automaticLinearUpdateSafetyReason(
-        await coordinator.list(dashboardProjectId),
+    if (!isWorker && dashboardProjectId && isLinearMutationTool(event.toolName)) {
+      const tasks = await coordinator.list(dashboardProjectId);
+      const reason = linearLifecycleMutationSafetyReason(
+        tasks,
+        event.toolName,
         event.input as Record<string, unknown>,
       );
       if (reason) return { block: true, reason };
@@ -373,7 +406,7 @@ export default function leadExtension(pi: ExtensionAPI) {
       const input = event.input as { path?: unknown; file_path?: unknown };
       const path = typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : undefined;
       if (path) {
-        const reason = sensitivePathReason(path.startsWith("~/") ? path : resolve(ctx.cwd, path));
+        const reason = await sensitiveResolvedPathReason(path.startsWith("~/") ? path : resolve(ctx.cwd, path));
         if (reason) return { block: true, reason };
       }
       if ((workerRole === "review" || workerRole === "research") && (event.toolName === "write" || event.toolName === "edit")) {
@@ -382,10 +415,12 @@ export default function leadExtension(pi: ExtensionAPI) {
     }
     if (event.toolName !== "bash") return;
     const command = String((event.input as { command?: unknown }).command ?? "");
-    const secretReason = sensitiveCommandReason(command);
+    const secretReason = sensitiveCommandReason(command)
+      ?? await sensitiveCommandResolvedPathReason(command, ctx.cwd);
     if (secretReason) return { block: true, reason: secretReason };
-    if ((workerRole === "review" || workerRole === "research") && reviewCommandAppearsMutating(command)) {
-      return { block: true, reason: `${workerRole} worker bash is read-only.` };
+    if (workerRole === "review" || workerRole === "research") {
+      const reason = readOnlyWorkerCommandReason(command);
+      if (reason) return { block: true, reason: `${workerRole} worker bash is read-only: ${reason}.` };
     }
     const risk = classifyBashRisk(command);
     if (!risk) return;

@@ -5,6 +5,9 @@ import {
   isStartedLinearState,
   linearLifecycleAfterStatuses,
   linearLifecycleAfterToolResult,
+  linearLifecycleHasPendingWriteScope,
+  linearLifecycleIsActionable,
+  linearLifecycleMutationSafetyReason,
   linearStartInstruction,
   normalizeLinearIssueReference,
   parseLinearIssueSnapshot,
@@ -32,6 +35,7 @@ function taskWithLinear(linear: LinearLifecycleState = pending): TaskRecord {
     status: "running",
     worktreePath: "/tmp/worktree",
     sessionId: "12345678-1234-1234-1234-123456789abc",
+    workerStartedAt: timestamp,
     checks: [],
     linear,
     createdAt: timestamp,
@@ -73,7 +77,20 @@ test("automatic Linear writes require the exact read-proven state and no unrelat
   assert.match(automaticLinearUpdateSafetyReason([task], { issue: "APP-41", stateId: "other" }) ?? "", /read-proven/);
   assert.match(automaticLinearUpdateSafetyReason([task], { issue: "APP-41", stateId: "progress", title: "changed" }) ?? "", /only stateId/);
   assert.match(automaticLinearUpdateSafetyReason([taskWithLinear()], { issue: "APP-41", stateId: "progress" }) ?? "", /no single read-proven/);
-  assert.equal(automaticLinearUpdateSafetyReason([task], { issue: "OTHER-1", stateId: "other" }), undefined);
+  assert.match(automaticLinearUpdateSafetyReason([task], { issue: "OTHER-1", stateId: "other" }) ?? "", /unrelated/);
+  assert.match(linearLifecycleMutationSafetyReason([task], "linear_create_issue", { title: "unrelated" }) ?? "", /only the bound issue/);
+  const unavailable = taskWithLinear({ ...pending, status: "unavailable" });
+  assert.equal(linearLifecycleMutationSafetyReason([unavailable], "linear_create_issue", { title: "normal admin" }), undefined);
+});
+
+test("Linear lifecycle is actionable only after a durable nonterminal worker start", () => {
+  const running = taskWithLinear();
+  assert.equal(linearLifecycleIsActionable(running), true);
+  assert.equal(linearLifecycleIsActionable({ ...running, workerStartedAt: undefined, status: "failed" }), false);
+  assert.equal(linearLifecycleIsActionable({ ...running, status: "stopped" }), false);
+  assert.equal(linearLifecycleIsActionable({ ...running, status: "completed" }), false);
+  assert.equal(linearLifecycleHasPendingWriteScope(running), true);
+  assert.equal(linearLifecycleHasPendingWriteScope(taskWithLinear({ ...pending, status: "unavailable" })), false);
 });
 
 test("Linear lifecycle requires update followed by started-state readback", () => {

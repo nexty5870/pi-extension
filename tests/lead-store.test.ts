@@ -42,6 +42,10 @@ test("V2 store keeps project and worker state durable with private permissions",
   const restored = await store.requireTask(project.projectId, id.slice(0, 8));
   assert.equal(restored.status, "running");
   assert.equal(restored.summary, "visible");
+  await store.updateTask(project.projectId, id, (current) => ({ ...current, status: "blocked", blockedReason: "waiting" }));
+  await store.updateTask(project.projectId, id, (current) => ({ ...current, status: "running", blockedReason: undefined }));
+  const transitioned = await store.updateTask(project.projectId, id, (current) => ({ ...current, status: "pr-ready-ci-pending" }));
+  assert.deepEqual(transitioned.leadEvents?.map((event) => event.status), ["blocked", "pr-ready-ci-pending"]);
   assert.equal((await store.listTasks(project.projectId)).length, 1);
 
   const taskMode = (await stat(join(store.taskArtifactDirectory(project.projectId, id), "task.json"))).mode & 0o777;

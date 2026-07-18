@@ -19,8 +19,8 @@ A narrow tool hook protects separate boundaries:
 - force-push is always blocked;
 - merge, deployment, production/cloud mutation, and destructive commands require an interactive one-command confirmation;
 - destructive Linear operations and workspace switching are blocked;
-- known credential stores, private keys, service-account files, and real `.env` files are blocked;
-- research and review workers are read-only at the Pi tool layer, with obvious mutating shell commands blocked as defense in depth.
+- known credential stores, private keys, service-account files, real `.env` files, resolved symlink targets, and environment-dump commands are blocked;
+- research and review workers cannot edit/write and their bash calls use an explicit read-only command allowlist.
 
 Generated worker commands use argv execution except for a private mode-`0700` launch script sent to a known cmux terminal. Values in that script are single-quote escaped. No credential is copied into the script; the interactive Pi process resolves its own configured authentication.
 

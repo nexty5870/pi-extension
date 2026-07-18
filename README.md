@@ -16,9 +16,9 @@ One persistent **Lead** Pi session coordinates real, interactive Pi workers in t
 - Research workers are visible and read-only.
 - Review workers share an implementation worktree and receive the issue, acceptance criteria, exact diff, and validation evidence.
 - Multiple independent workers can run concurrently in tabs inside one non-focus-stealing helper pane.
-- Completed, blocked, review, and PR transitions durably wake the Lead so it can take the next step without another operator prompt.
+- Completed, blocked, review, and PR transitions enter a durable ID-bearing outbox and wake the Lead exactly once per persisted event, including across `/reload`.
 - Durable states distinguish `running`, `blocked`, `pr-ready-ci-pending`, `pr-ready-ci-green`, `completed`, `failed`, and `merged`.
-- Pending PRs are polled through `gh pr view`; green requires an approved review of the unchanged diff and a matching PR head.
+- Pending PRs are polled through `gh pr view`; green requires complete GitHub evidence plus an approved review bound to the unchanged diff, exact head, and unchanged passing validation.
 
 Natural implementation intent is enough to delegate work. There is no contract draft or second confirmation. Implementation covers an isolated branch, commits, normal push, and PR preparation; merge, deployment, production mutation, force-push, credentials, and destructive Linear operations remain separate boundaries.
 

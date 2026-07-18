@@ -11,6 +11,15 @@ export const TASK_STATUSES = [
 ] as const;
 
 export type TaskStatus = (typeof TASK_STATUSES)[number];
+export const LEAD_EVENT_STATUSES = [
+  "blocked",
+  "pr-ready-ci-pending",
+  "pr-ready-ci-green",
+  "completed",
+  "failed",
+  "stopped",
+  "merged",
+] as const satisfies readonly TaskStatus[];
 export type WorkerRole = "implementation" | "review" | "research";
 
 export interface TaskBrief {
@@ -38,6 +47,7 @@ export interface ReviewEvidence {
   diffBaseSha?: string;
   diffHash: string;
   headSha: string;
+  checksHash: string;
   acceptance: AcceptanceEvidence[];
   findings: string[];
 }
@@ -47,6 +57,7 @@ export interface ReviewTarget {
   diffBaseSha: string;
   diffHash: string;
   headSha: string;
+  checksHash: string;
   capturedAt: string;
 }
 
@@ -69,6 +80,24 @@ export interface WorkerMessage {
   text: string;
   createdAt: string;
   deliveredAt?: string;
+}
+
+export interface LeadTaskEvent {
+  id: string;
+  kind: "status" | "review";
+  status: TaskStatus;
+  createdAt: string;
+  observedAt?: string;
+  blockedReason?: string;
+  summary?: string;
+  handoff?: string;
+  review?: ReviewEvidence;
+  pullRequestUrl?: string;
+  linear?: {
+    issueIdentifier: string;
+    status: LinearLifecycleState["status"];
+    stateName?: string;
+  };
 }
 
 export interface LinearLifecycleState {
@@ -106,6 +135,7 @@ export interface TaskRecord {
   branchName?: string;
   worktreePath: string;
   sessionId: string;
+  workerStartedAt?: string;
   surface?: WorkerSurface;
   promptPath?: string;
   launchScriptPath?: string;
@@ -115,6 +145,7 @@ export interface TaskRecord {
   reviewTarget?: ReviewTarget;
   messages?: WorkerMessage[];
   linear?: LinearLifecycleState;
+  leadEvents?: LeadTaskEvent[];
   leadObservedStatus?: TaskStatus;
   leadObservedAt?: string;
   failure?: string;

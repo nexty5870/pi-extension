@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PiInvocation } from "./launcher.ts";
@@ -80,6 +81,13 @@ function cleanCriteria(criteria: string[] | undefined): string[] {
 
 function normalizedCriterion(value: string): string {
   return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+export function validationEvidenceHash(checks: CheckEvidence[]): string {
+  const normalized = checks
+    .map((check) => ({ name: check.name.trim(), status: check.status, details: check.details?.trim() || "" }))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
 async function privateText(path: string, content: string): Promise<void> {
@@ -224,6 +232,7 @@ export class LeadCoordinator {
             diffBaseSha: parent.baseSha!,
             diffHash: git.diffHash,
             headSha: git.headSha,
+            checksHash: validationEvidenceHash(parent.checks),
             capturedAt: timestamp(),
           },
         }));
@@ -266,6 +275,7 @@ export class LeadCoordinator {
       current = await this.store.updateTask(task.projectId, id, (value) => ({
         ...value,
         status: "running",
+        workerStartedAt: timestamp(),
         leadObservedStatus: "running",
         leadObservedAt: timestamp(),
         failure: undefined,
@@ -297,7 +307,31 @@ export class LeadCoordinator {
   async markLeadObserved(projectId: string, taskId: string, expectedStatus?: TaskStatus): Promise<TaskRecord> {
     return this.store.updateTask(projectId, taskId, (current) => {
       if (expectedStatus && current.status !== expectedStatus) return current;
-      return { ...current, leadObservedStatus: current.status, leadObservedAt: timestamp() };
+      const observedAt = timestamp();
+      return {
+        ...current,
+        leadEvents: (current.leadEvents ?? []).map((event) =>
+          event.status === current.status && !event.observedAt ? { ...event, observedAt } : event),
+        leadObservedStatus: current.status,
+        leadObservedAt: observedAt,
+      };
+    });
+  }
+
+  async markLeadEventsObserved(projectId: string, taskId: string, eventIds: string[]): Promise<TaskRecord> {
+    const observedAt = timestamp();
+    const ids = new Set(eventIds);
+    return this.store.updateTask(projectId, taskId, (current) => {
+      const leadEvents = (current.leadEvents ?? []).map((event) =>
+        ids.has(event.id) && !event.observedAt ? { ...event, observedAt } : event);
+      const legacyObserved = eventIds.some((id) => id.startsWith(`legacy:${current.id}:`));
+      const allObserved = leadEvents.every((event) => Boolean(event.observedAt));
+      return {
+        ...current,
+        leadEvents,
+        leadObservedStatus: legacyObserved || allObserved ? current.status : current.leadObservedStatus,
+        leadObservedAt: legacyObserved || allObserved ? observedAt : current.leadObservedAt,
+      };
     });
   }
 
@@ -357,8 +391,11 @@ export class LeadCoordinator {
       }
       const parent = await this.store.requireTask(projectId, reportingTask.parentTaskId);
       const currentDiff = await this.git.reviewPacket(parent.worktreePath, parent.baseSha, signal);
-      if (currentDiff.diffHash !== reportingTask.reviewTarget.diffHash) {
-        throw new Error("Implementation diff changed after this review started; create a fresh review worker for the current diff");
+      if (currentDiff.diffHash !== reportingTask.reviewTarget.diffHash || currentDiff.headSha !== reportingTask.reviewTarget.headSha) {
+        throw new Error("Implementation diff or HEAD changed after this review started; create a fresh review worker for the current revision");
+      }
+      if (validationEvidenceHash(parent.checks) !== reportingTask.reviewTarget.checksHash) {
+        throw new Error("Implementation validation evidence changed after this review started; create a fresh review worker");
       }
       const acceptance = input.acceptance ?? [];
       const missing = parent.brief.acceptanceCriteria.filter((criterion) =>
@@ -373,6 +410,7 @@ export class LeadCoordinator {
         diffBaseSha: parent.baseSha,
         diffHash: currentDiff.diffHash,
         headSha: currentDiff.headSha,
+        checksHash: validationEvidenceHash(parent.checks),
         acceptance,
         findings: input.findings ?? [],
       };
@@ -381,13 +419,17 @@ export class LeadCoordinator {
     let retainedReview = reportingTask.review;
     if (reportingTask.role === "implementation" && retainedReview) {
       const currentDiff = await this.git.reviewPacket(reportingTask.worktreePath, reportingTask.baseSha, signal);
-      if (currentDiff.diffHash !== retainedReview.diffHash) retainedReview = undefined;
+      if (currentDiff.diffHash !== retainedReview.diffHash || currentDiff.headSha !== retainedReview.headSha) retainedReview = undefined;
     }
 
     const task = await this.store.updateTask(projectId, reportingTask.id, (current) => {
       let nextStatus = taskStatusAfterReport(current, input);
       let blockedReason = nextStatus === "blocked" ? input.blockedReason?.trim() : undefined;
-      const effectiveReview = review ?? retainedReview;
+      const nextChecks = input.checks ?? current.checks;
+      let effectiveReview = review ?? retainedReview;
+      if (current.role === "implementation" && effectiveReview?.checksHash !== validationEvidenceHash(nextChecks)) {
+        effectiveReview = undefined;
+      }
       if (current.role === "implementation" && (nextStatus === "pr-ready-ci-green" || nextStatus === "merged")) {
         if (input.prUrl || current.pullRequest?.url) {
           nextStatus = "pr-ready-ci-pending";
@@ -403,7 +445,7 @@ export class LeadCoordinator {
         blockedReason,
         summary: input.summary?.trim() || current.summary,
         handoff: input.handoff?.trim() || current.handoff,
-        checks: input.checks ?? current.checks,
+        checks: nextChecks,
         review: effectiveReview,
         pullRequest: input.prUrl
           ? {
@@ -471,10 +513,16 @@ export class LeadCoordinator {
       } else if (task.review?.verdict !== "approved") {
         status = "blocked";
         blockedReason = "CI is green, but the current diff still requires independent review";
-      } else if (task.review.diffHash !== currentDiff.diffHash) {
+      } else if (task.review.diffHash !== currentDiff.diffHash || task.review.headSha !== currentDiff.headSha) {
         status = "blocked";
-        blockedReason = "The implementation changed after independent review";
-      } else if (observation.headSha && currentDiff.headSha !== observation.headSha) {
+        blockedReason = "The implementation revision changed after independent review";
+      } else if (task.review.checksHash !== validationEvidenceHash(task.checks)) {
+        status = "blocked";
+        blockedReason = "Validation evidence changed after independent review";
+      } else if (task.checks.length === 0 || task.checks.some((check) => check.status === "failed" || check.status === "pending")) {
+        status = "blocked";
+        blockedReason = "Independent review lacks complete passing validation evidence";
+      } else if (currentDiff.headSha !== observation.headSha) {
         status = "blocked";
         blockedReason = "The pull request head does not match the reviewed worker HEAD";
       }
@@ -513,4 +561,3 @@ export function summarizeTasks(tasks: TaskRecord[]): string {
     return `${task.id.slice(0, 8)}  ${task.status.padEnd(19)}  ${task.role.padEnd(14)}  ${task.brief.title}${detail ? `\n  ${detail}` : ""}${linear}`;
   }).join("\n");
 }
-

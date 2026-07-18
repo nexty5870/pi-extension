@@ -141,15 +141,31 @@ export function linearLifecycleAfterStatuses(
   };
 }
 
+export function linearLifecycleIsActionable(task: TaskRecord): boolean {
+  return task.role === "implementation"
+    && Boolean(task.linear)
+    && task.linear?.status !== "in-progress"
+    && Boolean(task.workerStartedAt)
+    && ["running", "blocked", "pr-ready-ci-pending", "pr-ready-ci-green"].includes(task.status);
+}
+
+export function linearLifecycleHasPendingWriteScope(task: TaskRecord): boolean {
+  return linearLifecycleIsActionable(task)
+    && (task.linear?.status === "pending" || task.linear?.status === "verifying");
+}
+
 export function automaticLinearUpdateSafetyReason(
   tasks: TaskRecord[],
   input: Record<string, unknown>,
 ): string | undefined {
+  const pending = tasks.filter(linearLifecycleHasPendingWriteScope);
+  if (pending.length === 0) return undefined;
   const identifier = normalizeLinearIssueReference(typeof input.issue === "string" ? input.issue : undefined);
-  if (!identifier) return undefined;
-  const lifecycleTasks = tasks.filter((task) =>
-    task.linear?.issueIdentifier === identifier && task.linear.status !== "in-progress");
-  if (lifecycleTasks.length === 0) return undefined;
+  if (!identifier) return "Automatic Linear start requires the exact bound issue identifier.";
+  const lifecycleTasks = pending.filter((task) => task.linear?.issueIdentifier === identifier);
+  if (lifecycleTasks.length === 0) {
+    return `Automatic Linear start is scoped to ${pending.map((task) => task.linear?.issueIdentifier).join(", ")}; ${identifier} is unrelated.`;
+  }
   const fields = Object.keys(input).filter((key) => input[key] !== undefined);
   const extraFields = fields.filter((key) => key !== "issue" && key !== "stateId");
   if (extraFields.length > 0) {
@@ -168,6 +184,18 @@ export function automaticLinearUpdateSafetyReason(
   return undefined;
 }
 
+export function linearLifecycleMutationSafetyReason(
+  tasks: TaskRecord[],
+  toolName: string,
+  input: Record<string, unknown>,
+): string | undefined {
+  if (!tasks.some(linearLifecycleHasPendingWriteScope)) return undefined;
+  if (toolName !== "linear_update_issue") {
+    return "A pending automatic Linear start may mutate only the bound issue stateId; finish its verified readback before other Linear writes.";
+  }
+  return automaticLinearUpdateSafetyReason(tasks, input);
+}
+
 export function linearStartInstruction(task: TaskRecord): string {
   const identifier = task.linear?.issueIdentifier;
   if (!identifier) throw new Error("Task has no Linear issue binding");
@@ -179,7 +207,7 @@ export function linearStartInstruction(task: TaskRecord): string {
     "",
     "1. Call linear_get_issue for the exact identifier and note its canonical team ID and current state.",
     "2. If its state type is already `started`, stop; the readback already proves it is in progress.",
-    "3. Otherwise call linear_list_issue_statuses filtered to that team. Prefer the state named `In Progress`; if the team uses another name, choose its canonical state with type `started`.",
+    "3. Otherwise call linear_list_issue_statuses with `filter: { team: { id: { eq: <canonical-team-id> } } }`. Prefer the state named `In Progress`; if the team uses another name, choose its sole canonical state with type `started`.",
     "4. Call linear_update_issue for only this issue with only the read-proven stateId.",
     "5. Call linear_get_issue again and report success only when the returned state has type `started`.",
     "",

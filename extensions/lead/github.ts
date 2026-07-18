@@ -51,11 +51,21 @@ export function classifyPullRequest(payload: PullRequestPayload, fallbackUrl = "
     };
   });
 
-  if (normalized(payload.state) === "MERGED") {
+  const pullRequestState = normalized(payload.state);
+  if (pullRequestState === "MERGED") {
     return { status: "merged", url, headSha: payload.headRefOid, mergeState: payload.mergeStateStatus, checks };
   }
-  if (normalized(payload.state) === "CLOSED") {
+  if (pullRequestState === "CLOSED") {
     return { status: "failed", url, headSha: payload.headRefOid, mergeState: payload.mergeStateStatus, checks, reason: "Pull request is closed without merge" };
+  }
+  if (pullRequestState !== "OPEN") {
+    return { status: "pending", url, headSha: payload.headRefOid, mergeState: payload.mergeStateStatus, checks, reason: "GitHub returned an unknown pull request state" };
+  }
+  if (!payload.headRefOid?.trim()) {
+    return { status: "pending", url, mergeState: payload.mergeStateStatus, checks, reason: "GitHub did not return the pull request head" };
+  }
+  if (payload.statusCheckRollup == null) {
+    return { status: "pending", url, headSha: payload.headRefOid, mergeState: payload.mergeStateStatus, checks, reason: "GitHub check evidence is incomplete" };
   }
   if (payload.isDraft) {
     return { status: "pending", url, headSha: payload.headRefOid, mergeState: payload.mergeStateStatus, checks, reason: "Pull request is still a draft" };
