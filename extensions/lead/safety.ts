@@ -57,11 +57,17 @@ export function sensitiveCommandReason(command: string, home = homedir()): strin
     || /(?:^|[;&|]\s*)(?:set|export(?:\s+-p)?|declare\s+-x|typeset\s+-x)\s*(?:$|[|>])/i.test(value)
     || /(?:^|\s)(?:\S*\/)?(?:bash|sh|zsh)\s+-c\s+[^;&|]*\b(?:env|set|export)\b/i.test(value)
     || environmentDump
-    || /\b(?:os\.environ|process\.env|Deno\.env|ENV\.to_h)\b|\/proc\/(?:self|\d+)\/environ/i.test(value)
+    || /\bos\.(?:environ|getenv)\b|process\s*(?:\.env|\[\s*["']env["']\s*\])|\bDeno\.env\b|\bENV\s*(?:\[|\.fetch|\.to_h)|\/proc\/(?:self|\d+)\/environ/i.test(value)
+    || /\b(?:eval|exec)\s+[^;&|]*\b(?:env|set|export|printenv)\b/i.test(value)
     || /\$(?:\{)?[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:\})?/i.test(value)) {
     return "commands that print credential-bearing environment values are blocked";
   }
   return undefined;
+}
+
+export function normalizePiToolPath(path: string, cwd: string): string {
+  const value = path.startsWith("@") ? path.slice(1) : path;
+  return value.startsWith("~/") ? value : resolve(cwd, value);
 }
 
 export async function sensitiveResolvedPathReason(path: string, home = homedir()): Promise<string | undefined> {

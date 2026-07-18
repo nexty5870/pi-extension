@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -24,6 +23,7 @@ import {
   classifyBashRisk,
   isDestructiveLinearTool,
   isLinearMutationTool,
+  normalizePiToolPath,
   readOnlyWorkerCommandReason,
   riskDescription,
   sensitiveCommandReason,
@@ -47,7 +47,6 @@ const WorkerStatusSchema = StringEnum([
   "running",
   "blocked",
   "pr-ready-ci-pending",
-  "pr-ready-ci-green",
   "completed",
   "failed",
   "stopped",
@@ -251,26 +250,27 @@ export default function leadExtension(pi: ExtensionAPI) {
       }
 
       if (emitEvents && actionable.length > 0 && dashboardContext.isIdle()) {
-        const batch = actionable.slice(0, 1);
-        for (const { task, event } of batch) {
+        let claimed: typeof actionable[number] | undefined;
+        let deliveryClaimId: string | undefined;
+        for (const pending of actionable) {
+          const event = await coordinator.claimLeadEvent(dashboardProjectId, pending.task.id, pending.event);
+          if (!event?.deliveryClaimId) continue;
+          claimed = { ...pending, event };
+          deliveryClaimId = event.deliveryClaimId;
+          break;
+        }
+        if (claimed) {
+          const { task, event } = claimed;
           dashboardContext.ui.notify(
             `${task.brief.title}: ${event.status}${event.blockedReason ? ` — ${event.blockedReason}` : ""}`,
             event.status === "blocked" || event.status === "failed" ? "warning" : "info",
           );
-        }
-        const eventIds = batch.map(({ event }) => event.id);
-        pi.sendMessage({
-          customType: "lead:worker-event",
-          content: workerEventMessage(batch),
-          display: true,
-          details: { eventIds, taskIds: [...new Set(batch.map(({ task }) => task.id))] },
-        }, { deliverAs: "followUp", triggerTurn: true });
-        const eventsByTask = new Map<string, string[]>();
-        for (const { task, event } of batch) {
-          eventsByTask.set(task.id, [...(eventsByTask.get(task.id) ?? []), event.id]);
-        }
-        for (const [taskId, ids] of eventsByTask) {
-          await coordinator.markLeadEventsObserved(dashboardProjectId, taskId, ids);
+          pi.sendMessage({
+            customType: "lead:worker-event",
+            content: workerEventMessage([claimed]),
+            display: true,
+            details: { eventIds: [event.id], taskIds: [task.id], deliveryClaimId },
+          }, { deliverAs: "followUp", triggerTurn: true });
         }
       }
     } finally {
@@ -390,11 +390,12 @@ export default function leadExtension(pi: ExtensionAPI) {
       const states = parseLinearWorkflowStates(event.details, event.content)
         .filter((state) => state.team?.id === filterTeamId);
       if (states.length === 0) return;
-      linearStatesByTeam.set(filterTeamId, { states, observedAt: Date.now() });
+      const statusesObservedAt = Date.now();
+      linearStatesByTeam.set(filterTeamId, { states, observedAt: statusesObservedAt });
       for (const task of tasks.filter((candidate) =>
         candidate.linear?.status !== "in-progress" && candidate.linear?.teamId === filterTeamId)) {
         await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
-          linearLifecycleAfterStatuses(current, states));
+          linearLifecycleAfterStatuses(current, states, statusesObservedAt));
       }
       return;
     }
@@ -410,10 +411,13 @@ export default function leadExtension(pi: ExtensionAPI) {
         linearLifecycleAfterToolResult(current, event.toolName, snapshot, event.isError, resultText(event.content)));
       const teamId = updated.linear?.teamId;
       const cachedStates = teamId ? linearStatesByTeam.get(teamId) : undefined;
+      const issueObservedAt = Date.parse(updated.linear?.issueObservedAt ?? "");
       if (event.toolName === "linear_get_issue" && !event.isError && updated.linear?.status !== "in-progress"
-        && cachedStates && Date.now() - cachedStates.observedAt < 5 * 60_000) {
+        && cachedStates && Number.isFinite(issueObservedAt)
+        && cachedStates.observedAt >= issueObservedAt
+        && Date.now() - cachedStates.observedAt < 5 * 60_000) {
         updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
-          linearLifecycleAfterStatuses(current, cachedStates.states));
+          linearLifecycleAfterStatuses(current, cachedStates.states, cachedStates.observedAt));
       }
       if (before.status !== updated.linear?.status && updated.linear?.status === "in-progress") {
         ctx.ui.notify(`${identifier} is verified In Progress in Linear`, "info");
@@ -447,7 +451,7 @@ export default function leadExtension(pi: ExtensionAPI) {
       const input = event.input as { path?: unknown; file_path?: unknown };
       const path = typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : undefined;
       if (path) {
-        const reason = await sensitiveResolvedPathReason(path.startsWith("~/") ? path : resolve(ctx.cwd, path));
+        const reason = await sensitiveResolvedPathReason(normalizePiToolPath(path, ctx.cwd));
         if (reason) return { block: true, reason };
       }
       if ((workerRole === "review" || workerRole === "research") && (event.toolName === "write" || event.toolName === "edit")) {

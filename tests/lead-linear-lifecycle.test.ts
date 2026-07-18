@@ -73,6 +73,20 @@ test("Linear workflow resolution is team-scoped and prefers an exact In Progress
   assert.ok(resolved.candidateObservedAt);
 });
 
+test("Linear workflow resolution rejects status evidence older than the issue-team read", () => {
+  const issueObservedAt = Date.now();
+  const states = parseLinearWorkflowStates({ states: [
+    { id: "progress", name: "In Progress", type: "started", team: { id: "team-id" } },
+  ] }, []);
+  const stale = linearLifecycleAfterStatuses({
+    ...pending,
+    teamId: "team-id",
+    issueObservedAt: new Date(issueObservedAt).toISOString(),
+  }, states, issueObservedAt - 1);
+  assert.equal(stale.candidateStateId, undefined);
+  assert.match(stale.lastError ?? "", /Read the Linear issue/);
+});
+
 test("Linear workflow resolution refuses ambiguous custom started states", () => {
   const states = parseLinearWorkflowStates({ states: [
     { id: "doing", name: "Doing", type: "started", team: { id: "team-id" } },

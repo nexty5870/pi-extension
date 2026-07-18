@@ -130,10 +130,13 @@ export function selectLinearStartedState(
 export function linearLifecycleAfterStatuses(
   current: LinearLifecycleState,
   states: LinearWorkflowStateSnapshot[],
+  statusesObservedAt = Date.now(),
 ): LinearLifecycleState {
-  const now = new Date().toISOString();
+  const now = new Date(statusesObservedAt).toISOString();
   const issueObserved = Date.parse(current.issueObservedAt ?? "");
-  if (!current.teamId || !Number.isFinite(issueObserved) || Date.now() - issueObserved >= 5 * 60_000) {
+  if (!current.teamId || !Number.isFinite(issueObserved)
+    || statusesObservedAt < issueObserved
+    || statusesObservedAt - issueObserved >= 5 * 60_000) {
     return { ...current, lastError: "Read the Linear issue and canonical team before resolving In Progress", updatedAt: now };
   }
   const candidate = selectLinearStartedState(states, current.teamId);
@@ -300,6 +303,8 @@ export function linearLifecycleAfterToolResult(
       return {
         ...observed,
         status: "in-progress",
+        writeClaimId: undefined,
+        writeClaimedAt: undefined,
         verifiedAt: now,
         lastError: undefined,
       };

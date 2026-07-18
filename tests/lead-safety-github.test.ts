@@ -8,6 +8,7 @@ import {
   classifyBashRisk,
   isDestructiveLinearTool,
   isLinearMutationTool,
+  normalizePiToolPath,
   readOnlyWorkerCommandReason,
   sensitiveCommandReason,
   sensitiveCommandResolvedPathReason,
@@ -78,6 +79,8 @@ test("V2 gates only clear dangerous boundaries instead of disabling normal shell
 });
 
 test("credential stores and real env files stay protected while templates remain readable", async () => {
+  assert.equal(normalizePiToolPath("@/home/operator/.ssh/config", "/repo"), "/home/operator/.ssh/config");
+  assert.equal(normalizePiToolPath("@./src/file.ts", "/repo"), "/repo/src/file.ts");
   assert.match(sensitivePathReason("/home/operator/.ssh/id_ed25519", "/home/operator") ?? "", /credential/);
   assert.match(sensitivePathReason("/repo/.env", "/home/operator") ?? "", /secret/);
   assert.equal(sensitivePathReason("/repo/.env.example", "/home/operator"), undefined);
@@ -89,6 +92,10 @@ test("credential stores and real env files stay protected while templates remain
   assert.match(sensitiveCommandReason("bash -c env", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("/bin/sh -c env", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("python -c 'import os; print(os.environ)'", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("python -c 'import os; print(os.getenv(\"OPENAI_API_KEY\"))'", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("ruby -e 'puts ENV[\"OPENAI_API_KEY\"]'", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("node -e 'console.log(process[\"env\"])'", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("eval env", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("env | sort", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("env -0", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("export", "/home/operator") ?? "", /credential/);

@@ -25,6 +25,7 @@ class HarnessExecutor {
   ci: "pending" | "green" = "pending";
   merged = false;
   headSha = "abc123";
+  onGh?: () => Promise<void>;
 
   execute: CommandExecutor = async (command, args, options) => {
     this.calls.push({ command, args });
@@ -47,6 +48,9 @@ class HarnessExecutor {
       return { stdout: "", stderr: "", code: 0 };
     }
     if (command === "gh") {
+      const onGh = this.onGh;
+      this.onGh = undefined;
+      await onGh?.();
       return {
         stdout: JSON.stringify({
           url: "https://github.com/example/repo/pull/7",
@@ -198,17 +202,25 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   });
   assert.equal(reported.pullRequest?.url, "https://github.com/example/repo/pull/7");
   assert.equal(reported.leadObservedStatus, "running");
-  const selfReportedGreen = await coordinator.report(implementation.projectId, implementation.id, {
+  await assert.rejects(() => coordinator.report(implementation.projectId, implementation.id, {
     status: "pr-ready-ci-green",
     prUrl: "https://github.com/example/repo/pull/7",
-  });
-  assert.equal(selfReportedGreen.status, "pr-ready-ci-pending");
+  }), /authoritative GitHub/);
   await coordinator.markLeadObserved(implementation.projectId, implementation.id, "running");
   assert.equal((await store.requireTask(implementation.projectId, implementation.id)).leadObservedStatus, "running");
   await coordinator.markLeadObserved(implementation.projectId, implementation.id, "pr-ready-ci-pending");
   const legacyMarked = await store.requireTask(implementation.projectId, implementation.id);
   assert.equal(legacyMarked.leadObservedStatus, "pr-ready-ci-pending");
-  assert.ok(legacyMarked.leadEvents?.some((event) => event.status === "pr-ready-ci-pending" && !event.observedAt));
+  const pendingEvent = legacyMarked.leadEvents?.find((event) => event.status === "pr-ready-ci-pending" && !event.observedAt);
+  assert.ok(pendingEvent);
+  const deliveryClaims = await Promise.all([
+    coordinator.claimLeadEvent(implementation.projectId, implementation.id, pendingEvent!),
+    coordinator.claimLeadEvent(implementation.projectId, implementation.id, pendingEvent!),
+  ]);
+  assert.equal(deliveryClaims.filter(Boolean).length, 1);
+  assert.equal(deliveryClaims.find(Boolean)?.observedAt, undefined);
+  await coordinator.markLeadEventsObserved(implementation.projectId, implementation.id, [pendingEvent!.id]);
+  assert.ok((await store.requireTask(implementation.projectId, implementation.id)).leadEvents?.find((event) => event.id === pendingEvent!.id)?.observedAt);
   harness.ci = "green";
   const unreviewedGreen = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
   assert.equal(unreviewedGreen.status, "blocked");
@@ -312,4 +324,15 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   const staleEvidence = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
   assert.equal(staleEvidence.status, "blocked");
   assert.match(staleEvidence.blockedReason ?? "", /independent review/);
+
+  harness.onGh = async () => {
+    await store.updateTask(implementation.projectId, implementation.id, (current) => ({
+      ...current,
+      checks: [{ name: "npm test", status: "passed", details: "changed during GitHub observation" }],
+    }));
+  };
+  await assert.rejects(
+    () => coordinator.refreshPullRequest(implementation.projectId, implementation.id),
+    /evidence changed during pull request observation/,
+  );
 });

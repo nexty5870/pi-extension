@@ -18,6 +18,7 @@ import { createTaskId, LeadStore } from "./store.ts";
 import type {
   AcceptanceEvidence,
   CheckEvidence,
+  LeadTaskEvent,
   LinearLifecycleState,
   ProjectRecord,
   ReviewEvidence,
@@ -98,6 +99,31 @@ export function validationEvidenceHash(checks: CheckEvidence[]): string {
 export function validationEvidenceIsComplete(checks: CheckEvidence[]): boolean {
   return checks.some((check) => check.status === "passed")
     && checks.every((check) => check.name.trim() && check.status !== "failed" && check.status !== "pending");
+}
+
+export function readinessEvidenceHash(task: TaskRecord): string {
+  const evidence = {
+    status: task.status,
+    blockedReason: task.blockedReason,
+    baseSha: task.baseSha,
+    worktreePath: task.worktreePath,
+    checksHash: validationEvidenceHash(task.checks),
+    review: task.review ? {
+      verdict: task.review.verdict,
+      reviewedAt: task.review.reviewedAt,
+      diffHash: task.review.diffHash,
+      headSha: task.review.headSha,
+      checksHash: task.review.checksHash,
+    } : undefined,
+    pullRequest: task.pullRequest ? {
+      url: task.pullRequest.url,
+      headSha: task.pullRequest.headSha,
+      mergeState: task.pullRequest.mergeState,
+      checksHash: validationEvidenceHash(task.pullRequest.checks),
+      observedAt: task.pullRequest.observedAt,
+    } : undefined,
+  };
+  return createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
 }
 
 async function privateText(path: string, content: string): Promise<void> {
@@ -356,12 +382,36 @@ export class LeadCoordinator {
     });
   }
 
+  async claimLeadEvent(projectId: string, taskId: string, candidate: LeadTaskEvent, leaseMs = 5 * 60_000): Promise<LeadTaskEvent | undefined> {
+    const claimId = createTaskId();
+    const claimedAt = timestamp();
+    const updated = await this.store.updateTask(projectId, taskId, (current) => {
+      let events = current.leadEvents ?? [];
+      if (!events.some((event) => event.id === candidate.id) && candidate.id.startsWith(`legacy:${current.id}:`)) {
+        events = [...events, candidate];
+      }
+      return {
+        ...current,
+        leadEvents: events.map((event) => {
+          if (event.id !== candidate.id || event.observedAt) return event;
+          const existing = Date.parse(event.deliveryClaimedAt ?? "");
+          if (event.deliveryClaimId && Number.isFinite(existing) && Date.now() - existing < leaseMs) return event;
+          return { ...event, deliveryClaimId: claimId, deliveryClaimedAt: claimedAt };
+        }),
+      };
+    });
+    const claimed = updated.leadEvents?.find((event) => event.id === candidate.id);
+    return claimed?.deliveryClaimId === claimId ? claimed : undefined;
+  }
+
   async markLeadEventsObserved(projectId: string, taskId: string, eventIds: string[]): Promise<TaskRecord> {
     const observedAt = timestamp();
     const ids = new Set(eventIds);
     return this.store.updateTask(projectId, taskId, (current) => {
       const leadEvents = (current.leadEvents ?? []).map((event) =>
-        ids.has(event.id) && !event.observedAt ? { ...event, observedAt } : event);
+        ids.has(event.id) && !event.observedAt
+          ? { ...event, observedAt, deliveryClaimId: undefined, deliveryClaimedAt: undefined }
+          : event);
       const legacyObserved = eventIds.some((id) => id.startsWith(`legacy:${current.id}:`));
       const allObserved = leadEvents.every((event) => Boolean(event.observedAt));
       return {
@@ -421,15 +471,19 @@ export class LeadCoordinator {
   async report(projectId: string, taskId: string, input: WorkerReportInput, signal?: AbortSignal): Promise<TaskRecord> {
     const status = input.status;
     if (status === "starting") throw new Error("starting is coordinator-owned and cannot be worker-reported");
-    if (status === "merged") throw new Error("merged state must come from authoritative GitHub observation");
+    if (status === "pr-ready-ci-green" || status === "merged") {
+      throw new Error(`${status} state must come from authoritative GitHub observation`);
+    }
     if (status === "blocked" && !input.blockedReason?.trim()) throw new Error("blocked status requires blockedReason");
     const reportingTask = await this.store.requireTask(projectId, taskId);
     let review: ReviewEvidence | undefined;
+    let reviewedParentEvidenceHash: string | undefined;
     if (input.reviewVerdict) {
       if (reportingTask.role !== "review" || !reportingTask.parentTaskId || !reportingTask.reviewTarget) {
         throw new Error("Only a bound review worker can report a review verdict");
       }
       const parent = await this.store.requireTask(projectId, reportingTask.parentTaskId);
+      reviewedParentEvidenceHash = readinessEvidenceHash(parent);
       const currentDiff = await this.git.reviewPacket(parent.worktreePath, parent.baseSha, signal);
       if (currentDiff.diffHash !== reportingTask.reviewTarget.diffHash || currentDiff.headSha !== reportingTask.reviewTarget.headSha) {
         throw new Error("Implementation diff or HEAD changed after this review started; create a fresh review worker for the current revision");
@@ -472,6 +526,9 @@ export class LeadCoordinator {
     }
 
     const task = await this.store.updateTask(projectId, reportingTask.id, (current) => {
+      if (review && JSON.stringify(current.reviewTarget) !== JSON.stringify(reportingTask.reviewTarget)) {
+        throw new Error("Review target changed while the verdict was being recorded; create a fresh review");
+      }
       let nextStatus = taskStatusAfterReport(current, input);
       let blockedReason = nextStatus === "blocked" ? input.blockedReason?.trim() : undefined;
       const nextChecks = input.checks ?? current.checks;
@@ -509,6 +566,9 @@ export class LeadCoordinator {
 
     if (review && task.parentTaskId) {
       const parent = await this.store.updateTask(projectId, task.parentTaskId, (current) => {
+        if (!reviewedParentEvidenceHash || readinessEvidenceHash(current) !== reviewedParentEvidenceHash) {
+          throw new Error("Implementation evidence changed while review approval was being recorded; create a fresh review");
+        }
         const reviewWasOnlyBlock = current.blockedReason?.startsWith("Review requested changes") || current.blockedReason?.includes("independent review");
         return {
           ...current,
@@ -543,6 +603,7 @@ export class LeadCoordinator {
 
   async refreshPullRequest(projectId: string, taskId: string, signal?: AbortSignal): Promise<TaskRecord> {
     const task = await this.store.requireTask(projectId, taskId);
+    const expectedEvidenceHash = readinessEvidenceHash(task);
     if (!task.pullRequest?.url) throw new Error(`Worker ${task.id.slice(0, 8)} has not reported a pull request`);
     const observation = await observePullRequest(this.execute, task.worktreePath, task.pullRequest.url, signal);
     let status: TaskStatus = observation.status === "green"
@@ -581,18 +642,23 @@ export class LeadCoordinator {
       }
     }
 
-    const updated = await this.store.updateTask(projectId, task.id, (current) => ({
-      ...current,
-      status,
-      blockedReason,
-      pullRequest: {
-        url: observation.url,
-        headSha: observation.headSha,
-        mergeState: observation.mergeState,
-        checks: observation.checks,
-        observedAt: timestamp(),
-      },
-    }));
+    const updated = await this.store.updateTask(projectId, task.id, (current) => {
+      if (readinessEvidenceHash(current) !== expectedEvidenceHash) {
+        throw new Error("Task evidence changed during pull request observation; refresh again");
+      }
+      return {
+        ...current,
+        status,
+        blockedReason,
+        pullRequest: {
+          url: observation.url,
+          headSha: observation.headSha,
+          mergeState: observation.mergeState,
+          checks: observation.checks,
+          observedAt: timestamp(),
+        },
+      };
+    });
     if (updated.surface) {
       const cmux = new CmuxWorkers(this.execute, updated.worktreePath, updated.surface.workspaceId);
       await cmux.setTaskStatus(updated.id, updated.status, signal);

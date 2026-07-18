@@ -88,6 +88,8 @@ export interface LeadTaskEvent {
   status: TaskStatus;
   createdAt: string;
   observedAt?: string;
+  deliveryClaimId?: string;
+  deliveryClaimedAt?: string;
   blockedReason?: string;
   summary?: string;
   handoff?: string;
