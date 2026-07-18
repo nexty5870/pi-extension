@@ -175,7 +175,7 @@ export function automaticLinearUpdateSafetyReason(
     .map((task) => task.linear?.candidateStateId)
     .filter((id): id is string => Boolean(id)));
   if (candidateIds.size !== 1) {
-    return `Read ${identifier} and its team's workflow states before updating; no single read-proven In Progress state is recorded.`;
+    return `Call linear_get_issue and then linear_list_issue_statuses again for ${identifier}; no single persisted read-proven In Progress state is recorded.`;
   }
   const [candidateId] = [...candidateIds];
   if (input.stateId !== candidateId) {

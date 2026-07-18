@@ -127,6 +127,7 @@ export default function leadExtension(pi: ExtensionAPI) {
   let inboxContext: ExtensionContext | undefined;
   let inboxRunning = false;
   const linearPromptsInFlight = new Set<string>();
+  const linearStatesByTeam = new Map<string, { states: ReturnType<typeof parseLinearWorkflowStates>; observedAt: number }>();
 
   const queueLinearLifecycle = async (task: TaskRecord, deliverAs: "steer" | "followUp"): Promise<{ task: TaskRecord; note: string }> => {
     if (!linearLifecycleIsActionable(task) || linearPromptsInFlight.has(task.id)) return { task, note: "" };
@@ -363,6 +364,9 @@ export default function leadExtension(pi: ExtensionAPI) {
     if (event.toolName === "linear_list_issue_statuses") {
       if (event.isError) return;
       const states = parseLinearWorkflowStates(event.details, event.content);
+      for (const teamId of new Set(states.map((state) => state.team?.id).filter((id): id is string => Boolean(id)))) {
+        linearStatesByTeam.set(teamId, { states, observedAt: Date.now() });
+      }
       for (const task of tasks.filter((candidate) =>
         candidate.linear?.status !== "in-progress" && states.some((state) => state.team?.id === candidate.linear?.teamId))) {
         await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
@@ -378,8 +382,15 @@ export default function leadExtension(pi: ExtensionAPI) {
     for (const task of tasks.filter((candidate) =>
       candidate.linear?.issueIdentifier === identifier && candidate.linear.status !== "in-progress")) {
       const before = task.linear!;
-      const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
+      let updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
         linearLifecycleAfterToolResult(current, event.toolName, snapshot, event.isError, resultText(event.content)));
+      const teamId = updated.linear?.teamId;
+      const cachedStates = teamId ? linearStatesByTeam.get(teamId) : undefined;
+      if (event.toolName === "linear_get_issue" && !event.isError && updated.linear?.status !== "in-progress"
+        && cachedStates && Date.now() - cachedStates.observedAt < 5 * 60_000) {
+        updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
+          linearLifecycleAfterStatuses(current, cachedStates.states));
+      }
       if (before.status !== updated.linear?.status && updated.linear?.status === "in-progress") {
         ctx.ui.notify(`${identifier} is verified In Progress in Linear`, "info");
       }
