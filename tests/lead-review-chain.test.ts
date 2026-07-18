@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { LeadCoordinator, summarizeTasks, validationEvidenceHash } from "../extensions/lead/coordinator.ts";
+import { LeadCoordinator, readinessEvidenceHash, summarizeTasks, validationEvidenceHash, validationEvidenceIsComplete } from "../extensions/lead/coordinator.ts";
 import type { CommandExecutor } from "../extensions/lead/git.ts";
 import { classifyPullRequest, isGreptileEvidence } from "../extensions/lead/github.ts";
 import { LeadStore } from "../extensions/lead/store.ts";
@@ -21,6 +21,7 @@ class HarnessExecutor {
   ci: "pending" | "green" = "green";
   headSha = "abc123";
   extraChecks: CheckRollupPayload[] = [];
+  onGitDiff?: () => Promise<void>;
 
   execute: CommandExecutor = async (command, args, options) => {
     if (command === "cmux") {
@@ -57,6 +58,7 @@ class HarnessExecutor {
         code: 0,
       };
     }
+    if (command === "git" && args[0] === "diff") await this.onGitDiff?.();
     try {
       const result = await execFileAsync(command, args, {
         cwd: options.cwd,
@@ -147,6 +149,63 @@ test("validation evidence hash ignores check details", () => {
     validationEvidenceHash([{ name: "npm test", status: "failed" as const, details: "run 1 · 42 tests" }]),
   );
   assert.notEqual(validationEvidenceHash(before), validationEvidenceHash([...before, { name: "lint", status: "skipped" as const }]));
+});
+
+test("Greptile evidence never joins fingerprints and cannot satisfy validation alone", () => {
+  const workerChecks = [{ name: "npm test", status: "passed" as const, details: "42 tests" }];
+  const greptile = { name: "greptile", status: "passed" as const, details: "5/5 confidence — https://app.greptile.com/review/1" };
+  assert.equal(validationEvidenceHash(workerChecks), validationEvidenceHash([...workerChecks, greptile]));
+  assert.equal(validationEvidenceIsComplete([greptile]), false);
+  assert.equal(validationEvidenceIsComplete([...workerChecks, greptile]), true);
+  assert.equal(validationEvidenceIsComplete(workerChecks), true);
+});
+
+test("readiness evidence hash is stable across per-poll observation timestamps", () => {
+  const timestamp = new Date().toISOString();
+  const task: TaskRecord = {
+    schemaVersion: 2,
+    id: "12345678-1234-1234-1234-123456789abc",
+    projectId: "project-test",
+    role: "implementation",
+    brief: { title: "Ship the feature", task: "Implement it", acceptanceCriteria: [] },
+    status: "pr-ready-ci-pending",
+    worktreePath: "/tmp/repo",
+    sessionId: "12345678-1234-1234-1234-123456789abc",
+    checks: [{ name: "npm test", status: "passed", details: "42 tests" }],
+    pullRequest: {
+      url: "https://github.com/example/repo/pull/7",
+      headSha: "abc123",
+      mergeState: "CLEAN",
+      checks: [
+        { name: "test", status: "passed", details: "https://ci.example/run/1" },
+        { name: "greptile", status: "passed", details: "5/5 confidence" },
+      ],
+      observedAt: timestamp,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const repolled = {
+    ...task,
+    pullRequest: { ...task.pullRequest!, observedAt: new Date(Date.now() + 60_000).toISOString() },
+  };
+  assert.equal(readinessEvidenceHash(task), readinessEvidenceHash(repolled));
+  const greptileDetailsChanged = {
+    ...task,
+    pullRequest: {
+      ...task.pullRequest!,
+      checks: [
+        { name: "test", status: "passed" as const, details: "https://ci.example/run/2" },
+        { name: "greptile", status: "passed" as const, details: "5/5 confidence — new run" },
+      ],
+    },
+  };
+  assert.equal(readinessEvidenceHash(task), readinessEvidenceHash(greptileDetailsChanged));
+  const genuinelyChanged = {
+    ...task,
+    pullRequest: { ...task.pullRequest!, checks: [{ name: "test", status: "failed" as const }] },
+  };
+  assert.notEqual(readinessEvidenceHash(task), readinessEvidenceHash(genuinelyChanged));
 });
 
 test("implementation PR-ready report auto-spawns one bound review worker; opt-out honored", async () => {
@@ -334,4 +393,110 @@ test("Greptile rollup entries become first-class check evidence on the task", as
   assert.equal(pendingRefresh.status, "pr-ready-ci-pending");
   assert.equal(pendingRefresh.checks.some(isGreptileEvidence), false);
   assert.equal(pendingRefresh.pullRequest?.checks.some(isGreptileEvidence), true);
+});
+
+test("terminal Greptile arriving after approval never invalidates the review fingerprint", async () => {
+  const fixture = await createFixture();
+  const implementation = await delegateImplementation(fixture);
+  const head = await commitValue(implementation.worktreePath, 2);
+  fixture.harness.headSha = head;
+  await fixture.coordinator.report(implementation.projectId, implementation.id, {
+    status: "pr-ready-ci-pending",
+    prUrl: "https://github.com/example/repo/pull/7",
+    commitSha: head,
+    checks: [{ name: "npm test", status: "passed" }],
+  });
+  const review = (await fixture.coordinator.list(implementation.projectId)).find((task) => task.role === "review")!;
+  await fixture.coordinator.report(review.projectId, review.id, {
+    reviewVerdict: "approved",
+    acceptance: acceptance(implementation),
+    findings: [],
+  });
+
+  // Greptile reaches a terminal state only after the approval was recorded.
+  fixture.harness.extraChecks = [
+    { __typename: "StatusContext", context: "greptile", state: "SUCCESS", description: "5/5 confidence", targetUrl: "https://app.greptile.com/review/1" },
+  ];
+  const green = await fixture.coordinator.refreshPullRequest(implementation.projectId, implementation.id);
+  assert.equal(green.status, "pr-ready-ci-green");
+  assert.equal(green.review?.verdict, "approved");
+  assert.ok(green.checks.some(isGreptileEvidence));
+  const repolled = await fixture.coordinator.refreshPullRequest(implementation.projectId, implementation.id);
+  assert.equal(repolled.status, "pr-ready-ci-green");
+});
+
+test("worker check re-reports without Greptile keep the review and the Greptile evidence", async () => {
+  const fixture = await createFixture();
+  fixture.harness.extraChecks = [
+    { __typename: "StatusContext", context: "greptile", state: "SUCCESS", description: "5/5 confidence", targetUrl: "https://app.greptile.com/review/1" },
+  ];
+  const implementation = await delegateImplementation(fixture);
+  const head = await commitValue(implementation.worktreePath, 2);
+  fixture.harness.headSha = head;
+  await fixture.coordinator.report(implementation.projectId, implementation.id, {
+    status: "pr-ready-ci-pending",
+    prUrl: "https://github.com/example/repo/pull/7",
+    commitSha: head,
+    checks: [{ name: "npm test", status: "passed", details: "42 tests" }],
+  });
+  const withGreptile = await fixture.coordinator.refreshPullRequest(implementation.projectId, implementation.id);
+  assert.ok(withGreptile.checks.some(isGreptileEvidence));
+  const review = (await fixture.coordinator.list(implementation.projectId)).find((task) => task.role === "review")!;
+  // Greptile already sits in the parent's checks; the verdict gate must not treat it as stale evidence.
+  await fixture.coordinator.report(review.projectId, review.id, {
+    reviewVerdict: "approved",
+    acceptance: acceptance(implementation),
+    findings: [],
+  });
+
+  // The worker re-reports its own checks (no Greptile): the review survives and
+  // the merged Greptile evidence stays on the task for display.
+  const reReported = await fixture.coordinator.report(implementation.projectId, implementation.id, {
+    status: "pr-ready-ci-pending",
+    checks: [{ name: "npm test", status: "passed", details: "43 tests · rerun" }],
+  });
+  assert.equal(reReported.review?.verdict, "approved");
+  assert.ok(reReported.checks.some(isGreptileEvidence));
+  assert.ok(reReported.checks.some((check) => check.name === "npm test" && check.details === "43 tests · rerun"));
+  const green = await fixture.coordinator.refreshPullRequest(implementation.projectId, implementation.id);
+  assert.equal(green.status, "pr-ready-ci-green");
+});
+
+test("a failed rebind leaves the previous review target and packet untouched", async () => {
+  const fixture = await createFixture();
+  const implementation = await delegateImplementation(fixture);
+  const first = await commitValue(implementation.worktreePath, 2);
+  fixture.harness.headSha = first;
+  await fixture.coordinator.report(implementation.projectId, implementation.id, {
+    status: "pr-ready-ci-pending",
+    prUrl: "https://github.com/example/repo/pull/7",
+    commitSha: first,
+    checks: [{ name: "npm test", status: "passed" }],
+  });
+  const review = (await fixture.coordinator.list(implementation.projectId)).find((task) => task.role === "review")!;
+  const packetPath = join(fixture.store.taskArtifactDirectory(review.projectId, review.id), "review-packet.md");
+  const packetBefore = await readFile(packetPath, "utf8");
+  const second = await commitValue(implementation.worktreePath, 3);
+
+  // The parent evidence mutates while the rebind is capturing the diff.
+  fixture.harness.onGitDiff = async () => {
+    await fixture.store.updateTask(implementation.projectId, implementation.id, (current) => ({
+      ...current,
+      checks: [...current.checks.filter((check) => check.name !== "lint"), { name: "lint", status: "passed" as const }],
+    }));
+  };
+  await assert.rejects(
+    () => fixture.coordinator.report(review.projectId, review.id, { rebindReviewTarget: true }),
+    /changed during the rebind/,
+  );
+  fixture.harness.onGitDiff = undefined;
+
+  const after = await fixture.store.requireTask(review.projectId, review.id);
+  assert.deepEqual(after.reviewTarget, review.reviewTarget);
+  assert.equal(await readFile(packetPath, "utf8"), packetBefore);
+
+  // A retry against the settled parent rebinds cleanly and refreshes the packet.
+  const rebound = await fixture.coordinator.report(review.projectId, review.id, { rebindReviewTarget: true });
+  assert.equal(rebound.reviewTarget?.headSha, second);
+  assert.match(await readFile(packetPath, "utf8"), /\+export const value = 3/);
 });
