@@ -143,6 +143,8 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   }));
   assert.equal(await coordinator.claimLinearLifecyclePrompt(implementation.projectId, implementation.id), undefined);
   assert.equal(implementation.surface?.workspaceId, "workspace:2");
+  await assert.rejects(() => coordinator.report(implementation.projectId, implementation.id, { status: "starting" }), /coordinator-owned/);
+  await assert.rejects(() => coordinator.report(implementation.projectId, implementation.id, { status: "merged" }), /authoritative GitHub/);
   assert.ok(implementation.worktreePath.startsWith(store.root));
   const launch = await readFile(implementation.launchScriptPath!, "utf8");
   assert.match(launch, /--session-id/);

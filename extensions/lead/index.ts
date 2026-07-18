@@ -30,7 +30,7 @@ import {
   sensitiveResolvedPathReason,
 } from "./safety.ts";
 import { defaultLeadStateDir, LeadStore } from "./store.ts";
-import { TASK_STATUSES, type TaskRecord, type WorkerRole } from "./types.ts";
+import type { TaskRecord, WorkerRole } from "./types.ts";
 
 declare const __filename: string;
 
@@ -42,8 +42,16 @@ const CI_INTERVAL_MS = 30_000;
 const RoleSchema = StringEnum(["implementation", "review", "research"] as const, {
   description: "Worker role. Review requires parentTaskId and shares that implementation worktree.",
 });
-const StatusSchema = StringEnum(TASK_STATUSES, {
-  description: "Current durable worker state.",
+const WorkerStatusSchema = StringEnum([
+  "running",
+  "blocked",
+  "pr-ready-ci-pending",
+  "pr-ready-ci-green",
+  "completed",
+  "failed",
+  "stopped",
+] as const, {
+  description: "Worker-reported state. Starting is coordinator-owned; merged is GitHub-authoritative.",
 });
 const ManualStatusSchema = StringEnum(["running", "blocked", "completed", "failed", "stopped"] as const, {
   description: "Manual reconciliation state. PR and merge states come from worker/GitHub evidence.",
@@ -582,7 +590,7 @@ export default function leadExtension(pi: ExtensionAPI) {
       promptSnippet: "Report worker progress, blockers, validation, PR/CI state, and review evidence to the Lead",
       promptGuidelines: ["Use lead_worker_report before a worker stops, whenever it is blocked, and whenever PR or CI state changes."],
       parameters: Type.Object({
-        status: Type.Optional(StatusSchema),
+        status: Type.Optional(WorkerStatusSchema),
         summary: Type.Optional(Type.String()),
         blockedReason: Type.Optional(Type.String()),
         handoff: Type.Optional(Type.String()),

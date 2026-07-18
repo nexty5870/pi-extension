@@ -397,6 +397,8 @@ export class LeadCoordinator {
 
   async report(projectId: string, taskId: string, input: WorkerReportInput, signal?: AbortSignal): Promise<TaskRecord> {
     const status = input.status;
+    if (status === "starting") throw new Error("starting is coordinator-owned and cannot be worker-reported");
+    if (status === "merged") throw new Error("merged state must come from authoritative GitHub observation");
     if (status === "blocked" && !input.blockedReason?.trim()) throw new Error("blocked status requires blockedReason");
     const reportingTask = await this.store.requireTask(projectId, taskId);
     let review: ReviewEvidence | undefined;
