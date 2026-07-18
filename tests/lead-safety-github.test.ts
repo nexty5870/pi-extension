@@ -62,8 +62,12 @@ test("V2 gates only clear dangerous boundaries instead of disabling normal shell
   assert.equal(classifyBashRisk("git push origin '+HEAD:main'"), "force-push");
   assert.equal(classifyBashRisk("git push origin main; git push --force origin main"), "force-push");
   assert.equal(classifyBashRisk("git push origin $REFSPEC"), "force-push");
+  assert.equal(classifyBashRisk("\"git\" push --force origin HEAD:main"), "force-push");
+  assert.equal(classifyBashRisk("git --no-pager push --force origin HEAD:main"), "force-push");
   assert.equal(classifyBashRisk("gh pr merge 42 --squash"), "merge");
+  assert.equal(classifyBashRisk("\"gh\" pr merge 42 --squash"), "merge");
   assert.equal(classifyBashRisk("kubectl apply -f prod.yaml"), "deployment");
+  assert.equal(classifyBashRisk("\"kubectl\" apply -f prod.yaml"), "deployment");
   assert.equal(classifyBashRisk("pnpm run deploy"), "deployment");
   assert.equal(classifyBashRisk("rm -rf build"), "destructive");
   assert.equal(isDestructiveLinearTool("linear_delete_issue"), true);
@@ -84,6 +88,7 @@ test("credential stores and real env files stay protected while templates remain
   assert.match(sensitiveCommandReason("sh -c printenv", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("bash -c env", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("/bin/sh -c env", "/home/operator") ?? "", /credential/);
+  assert.match(sensitiveCommandReason("python -c 'import os; print(os.environ)'", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("env | sort", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("env -0", "/home/operator") ?? "", /credential/);
   assert.match(sensitiveCommandReason("export", "/home/operator") ?? "", /credential/);
@@ -99,8 +104,11 @@ test("credential stores and real env files stay protected while templates remain
   const key = join(home, ".ssh", "id_ed25519");
   await writeFile(key, "private");
   await symlink(key, join(repo, "innocent.txt"));
+  await mkdir(join(repo, "subdir"));
+  await symlink(key, join(repo, "subdir", "innocent.txt"));
   assert.match(await sensitiveResolvedPathReason(join(repo, "innocent.txt"), home) ?? "", /credential/);
   assert.match(await sensitiveCommandResolvedPathReason("cat innocent.txt", repo, home) ?? "", /credential/);
+  assert.match(await sensitiveCommandResolvedPathReason("cd subdir && cat innocent.txt", repo, home) ?? "", /credential/);
 });
 
 test("review and research shell is an explicit read-only allowlist", () => {
@@ -113,6 +121,7 @@ test("review and research shell is an explicit read-only allowlist", () => {
   assert.match(readOnlyWorkerCommandReason("GIT_EXTERNAL_DIFF='touch x' git diff") ?? "", /read-only|environment overrides/);
   assert.match(readOnlyWorkerCommandReason("command rm -f file") ?? "", /read-only|command -v/);
   assert.match(readOnlyWorkerCommandReason("find . -fprint output.txt") ?? "", /find/);
+  assert.match(readOnlyWorkerCommandReason("rg needle --pre 'python -c pass' .") ?? "", /preprocessor/);
   assert.match(readOnlyWorkerCommandReason("echo ok\nchmod 777 target") ?? "", /chmod/);
   assert.match(readOnlyWorkerCommandReason("echo ok & chmod 777 target") ?? "", /chmod/);
 });

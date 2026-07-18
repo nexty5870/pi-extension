@@ -7,7 +7,12 @@ import { CmuxWorkers } from "./cmux.ts";
 import type { CommandExecutor, GitProject } from "./git.ts";
 import { GitWorktrees } from "./git.ts";
 import { observePullRequest } from "./github.ts";
-import { linearLifecycleIsActionable, normalizeLinearIssueReference } from "./linear-lifecycle.ts";
+import {
+  automaticLinearUpdateSafetyReason,
+  linearLifecycleHasPendingWriteScope,
+  linearLifecycleIsActionable,
+  normalizeLinearIssueReference,
+} from "./linear-lifecycle.ts";
 import { reviewPacket, workerPrompt } from "./prompt.ts";
 import { createTaskId, LeadStore } from "./store.ts";
 import type {
@@ -326,6 +331,24 @@ export class LeadCoordinator {
     return updated.linear?.promptClaimId === claimId ? updated : undefined;
   }
 
+  async claimLinearLifecycleWrite(
+    projectId: string,
+    taskId: string,
+    input: Record<string, unknown>,
+  ): Promise<TaskRecord | undefined> {
+    const claimId = createTaskId();
+    const claimedAt = timestamp();
+    const updated = await this.store.updateTask(projectId, taskId, (current) => {
+      if (!linearLifecycleHasPendingWriteScope(current) || automaticLinearUpdateSafetyReason([current], input)) return current;
+      if (!current.linear) return current;
+      return {
+        ...current,
+        linear: { ...current.linear, writeClaimId: claimId, writeClaimedAt: claimedAt, updatedAt: claimedAt },
+      };
+    });
+    return updated.linear?.writeClaimId === claimId ? updated : undefined;
+  }
+
   async markLeadObserved(projectId: string, taskId: string, expectedStatus?: TaskStatus): Promise<TaskRecord> {
     return this.store.updateTask(projectId, taskId, (current) => {
       if (expectedStatus && current.status !== expectedStatus) return current;
@@ -426,6 +449,9 @@ export class LeadCoordinator {
       if (missing.length > 0) throw new Error(`Review acceptance matrix is missing: ${missing.join("; ")}`);
       if (input.reviewVerdict === "approved" && acceptance.some((entry) => entry.status !== "met")) {
         throw new Error("An approved review cannot contain not-met or unclear acceptance criteria");
+      }
+      if (input.reviewVerdict === "approved" && !validationEvidenceIsComplete(parent.checks)) {
+        throw new Error("An implementation cannot be approved without complete validation including at least one passing check");
       }
       review = {
         verdict: input.reviewVerdict,
@@ -528,14 +554,18 @@ export class LeadCoordinator {
           : "blocked";
     let blockedReason = observation.status === "failed" ? observation.reason : undefined;
 
-    if (observation.status === "green") {
+    if (observation.status === "green" || observation.status === "merged") {
       const currentDiff = await this.git.reviewPacket(task.worktreePath, task.baseSha, signal);
-      if (currentDiff.status) {
+      const evidenceLabel = observation.status === "merged" ? "The merged PR" : "CI";
+      if (observation.checks.some((check) => check.status === "failed" || check.status === "pending")) {
         status = "blocked";
-        blockedReason = "CI is green, but the worker worktree has unpublished changes";
+        blockedReason = `${evidenceLabel} has non-green GitHub checks`;
+      } else if (currentDiff.status) {
+        status = "blocked";
+        blockedReason = `${evidenceLabel} does not match a clean published worker worktree`;
       } else if (task.review?.verdict !== "approved") {
         status = "blocked";
-        blockedReason = "CI is green, but the current diff still requires independent review";
+        blockedReason = `${evidenceLabel} still requires independent review of this task`;
       } else if (task.review.diffHash !== currentDiff.diffHash || task.review.headSha !== currentDiff.headSha) {
         status = "blocked";
         blockedReason = "The implementation revision changed after independent review";

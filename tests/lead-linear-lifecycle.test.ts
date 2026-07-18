@@ -55,6 +55,8 @@ test("Linear status evidence requires the canonical exact-team filter", () => {
   assert.equal(linearStatusFilterTeamId({ filter: { team: { id: { eq: "team-id" } } } }), "team-id");
   assert.equal(linearStatusFilterTeamId({ filter: { team: { id: "team-id" } } }), undefined);
   assert.equal(linearStatusFilterTeamId({ filter: { teamId: "team-id" } }), undefined);
+  assert.equal(linearStatusFilterTeamId({ filter: { team: { id: { eq: "team-id" } }, state: { type: { eq: "started" } } } }), undefined);
+  assert.equal(linearStatusFilterTeamId({ filter: { team: { id: { eq: "team-id" } } }, first: 1 }), undefined);
 });
 
 test("Linear workflow resolution is team-scoped and prefers an exact In Progress state", () => {
@@ -100,6 +102,8 @@ test("automatic Linear writes require the exact read-proven state and no unrelat
   assert.match(linearLifecycleMutationSafetyReason([task], "linear_create_issue", { title: "unrelated" }) ?? "", /only the bound issue/);
   const unavailable = taskWithLinear({ ...pending, status: "unavailable" });
   assert.equal(linearLifecycleMutationSafetyReason([unavailable], "linear_create_issue", { title: "normal admin" }), undefined);
+  const claimed = taskWithLinear({ ...task.linear!, writeClaimId: "claim", writeClaimedAt: new Date().toISOString() });
+  assert.match(linearLifecycleMutationSafetyReason([claimed], "linear_update_issue", { issue: "APP-41", stateId: "progress" }) ?? "", /in flight/);
   const verifying = taskWithLinear({ ...task.linear!, status: "verifying" });
   assert.match(linearLifecycleMutationSafetyReason([verifying], "linear_update_issue", { issue: "APP-41", stateId: "progress" }) ?? "", /readback/);
 });

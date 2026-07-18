@@ -9,8 +9,8 @@ function compact(command: string): string {
 }
 
 export function classifyBashRisk(command: string): BashRisk | undefined {
-  const value = compact(command);
-  const pushCommands = [...value.matchAll(/\bgit(?:\s+(?:-C|-c)\s+\S+)*\s+push\b([^;&|]*)/gi)];
+  const value = compact(command).replace(/(["'])([A-Za-z0-9_./+-]+)\1/g, "$2");
+  const pushCommands = [...value.matchAll(/\bgit\b[^;&|]*?\bpush\b([^;&|]*)/gi)];
   if (pushCommands.some((match) => {
     const original = match[1];
     const args = original.replace(/["']/g, "").replace(/\\(?=\+)/g, "");
@@ -57,6 +57,7 @@ export function sensitiveCommandReason(command: string, home = homedir()): strin
     || /(?:^|[;&|]\s*)(?:set|export(?:\s+-p)?|declare\s+-x|typeset\s+-x)\s*(?:$|[|>])/i.test(value)
     || /(?:^|\s)(?:\S*\/)?(?:bash|sh|zsh)\s+-c\s+[^;&|]*\b(?:env|set|export)\b/i.test(value)
     || environmentDump
+    || /\b(?:os\.environ|process\.env|Deno\.env|ENV\.to_h)\b|\/proc\/(?:self|\d+)\/environ/i.test(value)
     || /\$(?:\{)?[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)(?:\})?/i.test(value)) {
     return "commands that print credential-bearing environment values are blocked";
   }
@@ -88,14 +89,44 @@ export async function sensitiveCommandResolvedPathReason(
   cwd: string,
   home = homedir(),
 ): Promise<string | undefined> {
-  const tokens = command.match(/'[^']*'|"[^"]*"|[^\s;&|<>]+/g) ?? [];
-  for (const raw of tokens) {
-    let token = raw.replace(/^['"]|['"]$/g, "");
-    if (token.includes("=") && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) token = token.slice(token.indexOf("=") + 1);
-    if (!token || token.startsWith("-") || token.includes("$") || token.includes("*")) continue;
-    const candidate = token.startsWith("/") || token.startsWith("~") ? token : resolve(cwd, token);
-    const reason = await sensitiveResolvedPathReason(candidate, home);
-    if (reason) return reason;
+  const segments = command
+    .replace(/\\\r?\n/g, " ")
+    .split(/&&|\|\||[;&|\n]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  let effectiveCwd = resolve(cwd);
+  let previousCwd = effectiveCwd;
+  for (const segment of segments) {
+    const tokens = segment.match(/'[^']*'|"[^"]*"|[^\s<>]+/g) ?? [];
+    const values = tokens.map((raw) => raw.replace(/^['"]|['"]$/g, ""));
+    let commandIndex = 0;
+    while (values[commandIndex] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(values[commandIndex])) commandIndex++;
+    if (values[commandIndex] === "command" || values[commandIndex] === "builtin") commandIndex++;
+    if (values[commandIndex] === "cd") {
+      let target = values[commandIndex + 1];
+      if (target === "--") target = values[commandIndex + 2];
+      if (!target) target = home;
+      if (target === "-") {
+        [effectiveCwd, previousCwd] = [previousCwd, effectiveCwd];
+        continue;
+      }
+      if (!target.includes("$") && !target.includes("*")) {
+        const candidate = target.startsWith("/") || target.startsWith("~") ? target : resolve(effectiveCwd, target);
+        const reason = await sensitiveResolvedPathReason(candidate, home);
+        if (reason) return reason;
+        const next = await realpath(candidate.replace(/^~/, home)).catch(() => resolve(candidate.replace(/^~/, home)));
+        previousCwd = effectiveCwd;
+        effectiveCwd = next;
+      }
+      continue;
+    }
+    for (let token of values) {
+      if (token.includes("=") && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) token = token.slice(token.indexOf("=") + 1);
+      if (!token || token.startsWith("-") || token.includes("$") || token.includes("*")) continue;
+      const candidate = token.startsWith("/") || token.startsWith("~") ? token : resolve(effectiveCwd, token);
+      const reason = await sensitiveResolvedPathReason(candidate, home);
+      if (reason) return reason;
+    }
   }
   return undefined;
 }
@@ -123,6 +154,7 @@ export function readOnlyWorkerCommandReason(command: string): string | undefined
   if (/(?:^|&&|\|\||[;|])\s*[A-Za-z_][A-Za-z0-9_]*=/.test(value)) return "environment overrides are not allowed in read-only worker shell commands";
   if (/\$\(|`|<\(|>\(/.test(value)) return "command substitution is not allowed in read-only worker shell commands";
   if (/\bfind\b[^;&|]*(?:-delete|-exec(?:dir)?|-ok(?:dir)?|-f(?:print|printf|ls))\b/i.test(value)) return "mutating find actions are not allowed in read-only workers";
+  if (/\brg\b[^;&|]*--pre(?:=|\s)/i.test(value)) return "ripgrep preprocessors are not allowed in read-only workers";
   if (/\b(?:sort|diff)\b[^;&|]*(?:\s-o(?:\S+|\s)|--output(?:=|\s))/i.test(value)) return "output files are not allowed in read-only workers";
   const segments = value.split(/&&|\|\||[;&|]/).map((part) => part.trim()).filter(Boolean);
   for (const segment of segments) {

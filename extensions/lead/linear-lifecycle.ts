@@ -81,10 +81,16 @@ export function parseLinearIssueSnapshot(details: unknown, content: unknown): Li
 }
 
 export function linearStatusFilterTeamId(input: unknown): string | undefined {
-  const filter = object(object(input)?.filter);
+  const root = object(input);
+  const filter = object(root?.filter);
   const team = object(filter?.team);
   const id = object(team?.id);
-  return string(id?.eq);
+  if (!root || !filter || !team || !id
+    || Object.keys(root).length !== 1
+    || Object.keys(filter).length !== 1
+    || Object.keys(team).length !== 1
+    || Object.keys(id).length !== 1) return undefined;
+  return string(id.eq);
 }
 
 export function parseLinearWorkflowStates(details: unknown, content: unknown): LinearWorkflowStateSnapshot[] {
@@ -178,6 +184,12 @@ export function automaticLinearUpdateSafetyReason(
   if (lifecycleTasks.length === 0) {
     return `Automatic Linear start is scoped to ${pending.map((task) => task.linear?.issueIdentifier).join(", ")}; ${identifier} is unrelated.`;
   }
+  if (lifecycleTasks.some((task) => {
+    const claimed = Date.parse(task.linear?.writeClaimedAt ?? "");
+    return task.linear?.writeClaimId && Number.isFinite(claimed) && Date.now() - claimed < 5 * 60_000;
+  })) {
+    return `A state write for ${identifier} is already in flight; wait for its result and readback.`;
+  }
   if (lifecycleTasks.every((task) => task.linear?.status === "verifying")) {
     return `The state write for ${identifier} already succeeded; call linear_get_issue for readback instead of writing again.`;
   }
@@ -252,6 +264,8 @@ export function linearLifecycleAfterToolResult(
       ...current,
       status: "pending",
       attempts: current.attempts + 1,
+      writeClaimId: undefined,
+      writeClaimedAt: undefined,
       lastError: error || `${toolName} failed`,
       updatedAt: now,
     };
@@ -261,6 +275,8 @@ export function linearLifecycleAfterToolResult(
       ...current,
       status: "verifying",
       attempts: current.attempts + 1,
+      writeClaimId: undefined,
+      writeClaimedAt: undefined,
       writeObservedAt: now,
       lastError: undefined,
       updatedAt: now,

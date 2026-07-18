@@ -114,6 +114,8 @@ export interface LinearLifecycleState {
   candidateStateName?: string;
   candidateTeamId?: string;
   candidateObservedAt?: string;
+  writeClaimId?: string;
+  writeClaimedAt?: string;
   writeObservedAt?: string;
   verifiedAt?: string;
   promptedAt?: string;

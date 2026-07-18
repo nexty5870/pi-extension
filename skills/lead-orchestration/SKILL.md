@@ -29,10 +29,9 @@ Workers call `lead_worker_report` at meaningful transitions. Those transitions w
 
 - `blocked` with a concrete reason
 - `pr-ready-ci-pending`
-- `pr-ready-ci-green`
-- `completed`, `failed`, or `merged`
+- `completed`, `failed`, or `stopped`
 
-Reports should include validation checks, PR URL/commit when available, a concise handoff, and—on review workers—verdict, findings, and an acceptance matrix. Initial `running` is persisted but does not wake the Lead because the delegation turn already has that result.
+Green and merged transitions come only from authoritative `lead_refresh_pr` observation, not worker self-report. Reports should include validation checks, PR URL/commit when available, a concise handoff, and—on review workers—verdict, findings, and an acceptance matrix. Initial `running` is persisted but does not wake the Lead because the delegation turn already has that result.
 
 ## Boundaries
 

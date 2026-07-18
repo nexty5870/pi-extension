@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { LeadCoordinator, validationEvidenceIsComplete } from "../extensions/lead/coordinator.ts";
+import { LeadCoordinator, validationEvidenceHash, validationEvidenceIsComplete } from "../extensions/lead/coordinator.ts";
 import type { CommandExecutor } from "../extensions/lead/git.ts";
 import { LeadStore } from "../extensions/lead/store.ts";
 
@@ -23,6 +23,7 @@ class HarnessExecutor {
   helperPane = false;
   surface = 10;
   ci: "pending" | "green" = "pending";
+  merged = false;
   headSha = "abc123";
 
   execute: CommandExecutor = async (command, args, options) => {
@@ -49,7 +50,7 @@ class HarnessExecutor {
       return {
         stdout: JSON.stringify({
           url: "https://github.com/example/repo/pull/7",
-          state: "OPEN",
+          state: this.merged ? "MERGED" : "OPEN",
           headRefOid: this.headSha,
           mergeStateStatus: "CLEAN",
           statusCheckRollup: [{
@@ -142,6 +143,28 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     updatedAt: new Date().toISOString(),
   }));
   assert.equal(await coordinator.claimLinearLifecyclePrompt(implementation.projectId, implementation.id), undefined);
+  const evidenceTime = new Date().toISOString();
+  await coordinator.updateLinearLifecycle(implementation.projectId, implementation.id, (current) => ({
+    ...current,
+    teamId: "team-app",
+    issueObservedAt: evidenceTime,
+    candidateStateId: "state-progress",
+    candidateStateName: "In Progress",
+    candidateTeamId: "team-app",
+    candidateObservedAt: evidenceTime,
+    updatedAt: evidenceTime,
+  }));
+  const writeClaims = await Promise.all([
+    coordinator.claimLinearLifecycleWrite(implementation.projectId, implementation.id, { issue: "APP-41", stateId: "state-progress" }),
+    coordinator.claimLinearLifecycleWrite(implementation.projectId, implementation.id, { issue: "APP-41", stateId: "state-progress" }),
+  ]);
+  assert.equal(writeClaims.filter(Boolean).length, 1);
+  await coordinator.updateLinearLifecycle(implementation.projectId, implementation.id, (current) => ({
+    ...current,
+    writeClaimId: undefined,
+    writeClaimedAt: undefined,
+    updatedAt: new Date().toISOString(),
+  }));
   assert.equal(implementation.surface?.workspaceId, "workspace:2");
   await assert.rejects(() => coordinator.report(implementation.projectId, implementation.id, { status: "starting" }), /coordinator-owned/);
   await assert.rejects(() => coordinator.report(implementation.projectId, implementation.id, { status: "merged" }), /authoritative GitHub/);
@@ -210,6 +233,24 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   const reviewLaunch = await readFile(review.launchScriptPath!, "utf8");
   assert.match(reviewLaunch, /read,bash,grep,find,ls,lead_worker_report/);
 
+  const skippedChecks = [{ name: "not applicable", status: "skipped" as const }];
+  await store.updateTask(implementation.projectId, implementation.id, (current) => ({ ...current, checks: skippedChecks }));
+  await store.updateTask(review.projectId, review.id, (current) => ({
+    ...current,
+    reviewTarget: current.reviewTarget ? { ...current.reviewTarget, checksHash: validationEvidenceHash(skippedChecks) } : undefined,
+  }));
+  await assert.rejects(() => coordinator.report(review.projectId, review.id, {
+    reviewVerdict: "approved",
+    acceptance: implementation.brief.acceptanceCriteria.map((criterion) => ({ criterion, status: "met" as const, evidence: "code inspection" })),
+    findings: [],
+  }), /complete validation/);
+  const passingChecks = [{ name: "npm test", status: "passed" as const, details: "42 tests" }];
+  await store.updateTask(implementation.projectId, implementation.id, (current) => ({ ...current, checks: passingChecks }));
+  await store.updateTask(review.projectId, review.id, (current) => ({
+    ...current,
+    reviewTarget: current.reviewTarget ? { ...current.reviewTarget, checksHash: validationEvidenceHash(passingChecks) } : undefined,
+  }));
+
   await writeFile(join(implementation.worktreePath, "feature.ts"), "export const enabled = false;\n");
   await assert.rejects(() => coordinator.report(review.projectId, review.id, {
     reviewVerdict: "changes-requested",
@@ -254,6 +295,14 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   harness.ci = "green";
   const green = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
   assert.equal(green.status, "pr-ready-ci-green");
+
+  harness.merged = true;
+  harness.headSha = "unrelated-merged-head";
+  const unrelatedMerged = await coordinator.refreshPullRequest(implementation.projectId, implementation.id);
+  assert.equal(unrelatedMerged.status, "blocked");
+  assert.match(unrelatedMerged.blockedReason ?? "", /revision|head/i);
+  harness.merged = false;
+  harness.headSha = green.pullRequest?.headSha ?? harness.headSha;
 
   const evidenceChanged = await coordinator.report(implementation.projectId, implementation.id, {
     status: "pr-ready-ci-pending",

@@ -10,6 +10,7 @@ import {
   LINEAR_START_TOOLS,
   linearLifecycleAfterStatuses,
   linearLifecycleAfterToolResult,
+  linearLifecycleHasPendingWriteScope,
   linearLifecycleIsActionable,
   linearLifecycleMutationSafetyReason,
   linearStartInstruction,
@@ -429,12 +430,18 @@ export default function leadExtension(pi: ExtensionAPI) {
     }
     if (!isWorker && dashboardProjectId && isLinearMutationTool(event.toolName)) {
       const tasks = await coordinator.list(dashboardProjectId);
-      const reason = linearLifecycleMutationSafetyReason(
-        tasks,
-        event.toolName,
-        event.input as Record<string, unknown>,
-      );
+      const input = event.input as Record<string, unknown>;
+      const reason = linearLifecycleMutationSafetyReason(tasks, event.toolName, input);
       if (reason) return { block: true, reason };
+      if (event.toolName === "linear_update_issue") {
+        const identifier = normalizeLinearIssueReference(typeof input.issue === "string" ? input.issue : undefined);
+        const target = tasks
+          .filter((task) => linearLifecycleHasPendingWriteScope(task) && task.linear?.issueIdentifier === identifier)
+          .sort((left, right) => Number(left.linear?.status === "verifying") - Number(right.linear?.status === "verifying") || left.id.localeCompare(right.id))[0];
+        if (target && !await coordinator.claimLinearLifecycleWrite(dashboardProjectId, target.id, input)) {
+          return { block: true, reason: `A state write for ${identifier} is already in flight; wait for its result and readback.` };
+        }
+      }
     }
     if (["read", "write", "edit", "grep", "find", "ls"].includes(event.toolName)) {
       const input = event.input as { path?: unknown; file_path?: unknown };
