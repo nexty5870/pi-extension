@@ -1,4 +1,6 @@
-# Team orchestration V1 design
+# Legacy team orchestration V1 design
+
+> **Retired:** this extension is kept for migration history and regression tests but is no longer loaded by `package.json`. The active design is [Lead + visible workers V2](lead-worker-v2.md).
 
 ## Purpose
 

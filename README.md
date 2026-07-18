@@ -6,67 +6,41 @@ The repository is intentionally public-safe: it does not contain credentials, se
 
 ## Included extensions
 
-### Pi team orchestration (V1 foundation)
+### Lead + visible workers (V2)
 
-A global CTO/orchestration layer that keeps Pi's native sessions and cmux project workspaces intact.
+One persistent **Lead** Pi session coordinates real, interactive Pi workers in the caller's cmux workspace. V2 removes mandatory contracts, approval phrases, hidden worker subprocesses, and global edit/tool lockouts.
 
-Current foundation:
+- The Lead remains a normal Pi: conversation, `read`, `bash`, `edit`, and `write` all work normally.
+- `lead_delegate` opens each worker as a visible Pi TUI that the operator can inspect and type into.
+- Implementation workers receive isolated Git worktrees, full shell access, persistent named sessions, and the project's skills/extensions.
+- Research workers are visible and read-only.
+- Review workers share an implementation worktree and receive the issue, acceptance criteria, exact diff, and validation evidence.
+- Multiple independent workers can run concurrently in tabs inside one non-focus-stealing helper pane.
+- Completed, blocked, review, and PR transitions enter a durable ID-bearing outbox and wake the Lead exactly once per persisted event, including across `/reload`.
+- Durable states distinguish `running`, `blocked`, `pr-ready-ci-pending`, `pr-ready-ci-green`, `completed`, `failed`, and `merged`.
+- Pending PRs are polled through `gh pr view`; green requires complete GitHub evidence plus an approved review bound to the unchanged diff, exact head, and unchanged passing validation.
 
-- Intent-first routing: Linear lookup, planning, administration, and implementation are distinct paths
-- Internal Feature/Bug work orders with optional operator review—not mandatory approval paperwork
-- Optional Linear destinations; local-only work orders report **“GitHub/docs-only; no Linear mutation.”**
-- [`@alasano/pi-linear`](https://pi.dev/packages/@alasano/pi-linear?name=linear) for Linear reads and approved contract persistence
-- A generic, non-Linear MCP bridge with static headers and deny-by-default allowlists
-- Read-only scouts, native session names, usage records, and `/team-overview`
+Natural implementation intent is enough to delegate work. There is no contract draft or second confirmation. Implementation covers an isolated branch, commits, normal push, and PR preparation; merge, deployment, production mutation, force-push, credentials, and destructive Linear operations remain separate boundaries.
 
-Install the companion Linear package globally (unversioned so Pi can update it):
+Useful optional commands:
+
+```text
+/workers                         Show all durable worker states
+/worker-message <id> <message>  Steer an existing worker without changing focus
+/lead-doctor                     Check Git, Pi, cmux, caller IDs, and state path
+```
+
+The Lead also has `lead_workers`, `lead_message_worker`, `lead_update_worker`, and `lead_refresh_pr` tools. Lead messages use a shared inbox consumed by the live worker extension—not keystrokes sent blindly to a terminal. Workers report blockers, checks, handoffs, PR state, and review evidence with `lead_worker_report`. State and private review packets live under `~/.pi/lead-orchestration/` with private permissions. Successful worktrees and live sessions are not silently deleted.
+
+For Linear, install and authenticate the companion package directly:
 
 ```bash
 pi install npm:@alasano/pi-linear
 ```
 
-Authenticate only through the operator-controlled `/linear-auth` command and configure tools through `/linear-settings`. Never paste an API key into chat, this repository, or orchestration MCP configuration. See the [package source and documentation](https://github.com/alasano/house-of-pi/tree/master/packages/pi-linear).
+Use `/linear-auth` and `/linear-settings`; never paste a credential into chat. For Linear-backed implementation, the Lead binds `lead_delegate.linearIssue`, resolves the issue's canonical team workflow through pi-linear, updates only `stateId` to the team's started/In Progress state, and requires `linear_get_issue` readback. Local/GitHub-only work omits the binding and performs no Linear call. Missing auth or disabled tools never block worker startup; the lifecycle sync remains visible and retryable. V2 does not wrap routine Linear reads or administration in implementation contracts. Destructive Linear operations and agent-driven workspace switching remain blocked.
 
-Design can use only `linear_list_*`, `linear_get_*`, and `linear_search_*`. Before writes, the agent resolves human team/project/status names to canonical values and uses the exact `teamId`, `teamKey`, `projectId`, or `stateId` required by pi-linear. Read-proven identifier normalization does not change approved scope or require contract reapproval. For issue creation, orchestration injects the exact approved title and managed contract section itself, so the model never has to reproduce hidden markers. Writes are read back for verification. After explicit approval, issue creation or update/comment operations are restricted to the configured active issue. Delete/archive operations, project or document mutations, workspace switching by the agent, and unknown `linear_*` tools are blocked.
-
-Linear administration is separate from implementation approval. Explicit requests to apply priority, labels, assignment/scheduling fields, or issue relations to named issues execute without a contract; updates and both ends of every relation remain scoped to issue identifiers named by the operator.
-
-Linear publication is separate from implementation approval. Requests such as “open a bug in Linear”, “file this issue”, or “record this ticket” create tracking issues directly. “Create this plan and translate it to Linear” may create one new Linear project and populate its planned issues using read-proven team IDs. Neither path drafts a retrospective contract or asks for an implementation phrase. Publication intent is restored from Pi session history, so “retry” after a failed call or `/reload` does not require repeating the original request. Failed API/schema attempts remain retryable, and approved pending creation survives `/reload`. Project publication cannot update an existing project, is capped at 50 issues per turn, and still cannot delete/archive resources or switch workspaces.
-
-Operator intent is the control plane. “Load/show/summarize VMA-41” performs a read and never creates a contract. “Plan/discuss VMA-41” stays conversational. “Implement/work on/fix VMA-41” authorizes isolated implementation and PR preparation: orchestration creates and approves its work order internally, persists any required Linear metadata, and starts delivery without a second confirmation or slash command. Contract review remains available only when explicitly requested. A direct completion request resolves the team's completed status, updates only the active issue's workflow state, and reads it back. Merge, deployment, production mutation, destructive Linear operations, and unrelated issue writes remain blocked.
-
-Useful optional commands:
-
-```text
-/team-init                    Show detected Git/cmux project context
-/team-contract show|open|reload
-/team-feature [idea]          Prefill a design request
-/team-scout [task]            Prefill a read-only scout request
-/team-overview                Open the read-only overlay
-/team-close                   Close local state only
-```
-
-Internal work orders with a `Delivery` section fix the base branch, work branch, commit message, PR title/body, and argv-based checks into a hash. The following commands are optional diagnostics/controls; normal implementation intent starts delivery automatically.
-
-```text
-/team-delivery start          Start from a fresh matching approval
-/team-delivery show           Inspect durable delivery state
-/team-delivery resume         Reconcile and resume a retained run
-/team-delivery abort          Stop workers and retain diagnostics
-/team-delivery cleanup        Confirm deletion of failed/aborted private state only
-```
-
-Delivery requires a Git repository with `origin`. The isolated worktree starts from freshly fetched `origin/<approved-base>` without modifying or depending on the caller checkout, including when it is dirty or behind. Delivery also requires an authenticated GitHub CLI, a recognized public/private/internal repository, and caller-provided `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`. By default it creates one right-side Team pane with separate implementer/reviewer surfaces. If the operator asks for a new cmux window, `team_delivery_start` creates a dedicated Team window/workspace and persists that topology instead of silently reusing an old workspace. Worker subprocesses run in an isolated worktree with a trusted path/tool guard; role logs and state stay private under `~/.pi/team-orchestration/`.
-
-The controller reads lockfile/package-manager metadata and prepares dependencies with a compatible pinned Corepack pnpm. Before new implementation it records check outcomes on the untouched base. After review it distinguishes new regressions from base-red or environment-blocked validation: regressions dispatch bounded implementer/reviewer repair cycles, while unchanged baseline/environment failures become explicit PR warnings instead of destroying completed work. It then scans the publication diff (distinguishing the local user's home path from legitimate production paths such as `/home/<service>`), automatically repairs local-path findings through implementer/reviewer, commits and pushes without force, reconciles one PR, observes bounded CI state, and stops. It never merges, deploys, deletes branches/remotes, or automatically removes a successful worktree. Failure notifications include the persisted cause. A repeated natural start/retry instruction or `/team-delivery start` resumes a failed run from its reviewed diff instead of rerunning completed worker passes; `/team-delivery resume` remains available. Cleanup is explicit and never removes Git or cmux resources.
-
-The compact footer preserves model, branch, and unrelated extension statuses while adding context level, initiative state, workers, and action count. `/team-overview` is live, scrollable, and includes worker/check/action state. Context colors change at 60% and 80%; no automatic compaction occurs.
-
-#### Generic MCP configuration (non-Linear only)
-
-The generic bridge remains available for other MCP servers. Copy [`examples/mcp.example.json`](examples/mcp.example.json) manually to `~/.pi/team-orchestration/mcp.json` if needed. Static headers remain supported. The extension never reads, prints, migrates, or rewrites credentials except to tighten that file's mode to `0600` when explicitly loaded. Linear servers are rejected; do not send a personal API key to `https://mcp.linear.app/mcp`.
-
-See [`docs/orchestration-design.md`](docs/orchestration-design.md) for the design and roadmap.
+The legacy implementation remains in `extensions/orchestration/` only for migration history and regression reference. It is no longer loaded by the package manifest. See [`docs/lead-worker-v2.md`](docs/lead-worker-v2.md) for architecture and validation.
 
 ### `/update`
 
@@ -100,9 +74,10 @@ Failed updates leave the existing TUI running and display the update output.
 ## Requirements
 
 - Pi.dev coding agent
-- Node.js 22.15 or newer (`process.execve()` support)
+- Node.js 22.15 or newer (`process.execve()` support for `/update`)
+- Git and cmux with `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` in the Lead terminal
+- GitHub CLI (`gh`) for PR status observation and publication by workers
 - An installation that Pi can update with `pi update --self`
-- Zed CLI (`zed`) only when using `/team-contract open`
 
 ## Installation
 
@@ -151,20 +126,21 @@ Before publishing changes, check tracked files for credentials, private paths, s
 
 ## Development
 
-Load the extension temporarily:
+Load either extension temporarily:
 
 ```bash
+pi -e ./extensions/lead/index.ts
 pi -e ./extensions/update.ts
 ```
 
-Verify command registration through RPC without performing an update:
+Verify command registration through RPC without performing an update or starting workers:
 
 ```bash
 printf '{"id":"commands","type":"get_commands"}\n' |
-  pi --mode rpc --no-session -e ./extensions/update.ts
+  pi --mode rpc --no-session -e ./extensions/lead/index.ts
 ```
 
-The `/update` command refuses execution outside interactive TUI mode, so registration and safety behavior can be tested through RPC without modifying Pi.
+Run `npm test`, `npm run typecheck`, and `git diff --check` before publishing. The `/update` command refuses execution outside interactive TUI mode.
 
 ## Journey
 
