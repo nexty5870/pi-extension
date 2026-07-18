@@ -6,11 +6,13 @@ import { CmuxWorkers } from "./cmux.ts";
 import type { CommandExecutor, GitProject } from "./git.ts";
 import { GitWorktrees } from "./git.ts";
 import { observePullRequest } from "./github.ts";
+import { normalizeLinearIssueReference } from "./linear-lifecycle.ts";
 import { reviewPacket, workerPrompt } from "./prompt.ts";
 import { createTaskId, LeadStore } from "./store.ts";
 import type {
   AcceptanceEvidence,
   CheckEvidence,
+  LinearLifecycleState,
   ProjectRecord,
   ReviewEvidence,
   TaskRecord,
@@ -24,6 +26,7 @@ export interface DelegateInput {
   task: string;
   role?: WorkerRole;
   issue?: string;
+  linearIssue?: string;
   acceptanceCriteria?: string[];
   baseBranch?: string;
   parentTaskId?: string;
@@ -146,6 +149,10 @@ export class LeadCoordinator {
       : undefined;
     if (parent && !parent.baseSha) throw new Error("The implementation task has no review base SHA");
 
+    const linearIssueIdentifier = normalizeLinearIssueReference(input.linearIssue);
+    if (input.linearIssue && !linearIssueIdentifier) {
+      throw new Error(`Invalid Linear issue identifier or URL: ${input.linearIssue}`);
+    }
     const id = createTaskId();
     const createdAt = timestamp();
     const task: TaskRecord = {
@@ -168,6 +175,14 @@ export class LeadCoordinator {
       sessionId: id,
       checks: [],
       messages: [],
+      linear: role === "implementation" && linearIssueIdentifier ? {
+        issueIdentifier: linearIssueIdentifier,
+        desiredStateType: "started",
+        status: "pending",
+        attempts: 0,
+        promptCount: 0,
+        updatedAt: createdAt,
+      } : undefined,
       leadObservedStatus: "starting",
       leadObservedAt: createdAt,
       createdAt,
@@ -266,6 +281,17 @@ export class LeadCoordinator {
 
   async list(projectId: string): Promise<TaskRecord[]> {
     return this.store.listTasks(projectId);
+  }
+
+  async updateLinearLifecycle(
+    projectId: string,
+    taskId: string,
+    update: (current: LinearLifecycleState) => LinearLifecycleState,
+  ): Promise<TaskRecord> {
+    return this.store.updateTask(projectId, taskId, (current) => {
+      if (!current.linear) return current;
+      return { ...current, linear: update(current.linear) };
+    });
   }
 
   async markLeadObserved(projectId: string, taskId: string, expectedStatus?: TaskStatus): Promise<TaskRecord> {
@@ -483,7 +509,8 @@ export function summarizeTasks(tasks: TaskRecord[]): string {
   if (tasks.length === 0) return "No delegated workers yet.";
   return tasks.map((task) => {
     const detail = task.blockedReason || task.failure || task.pullRequest?.url || task.summary;
-    return `${task.id.slice(0, 8)}  ${task.status.padEnd(19)}  ${task.role.padEnd(14)}  ${task.brief.title}${detail ? `\n  ${detail}` : ""}`;
+    const linear = task.linear ? `\n  Linear ${task.linear.issueIdentifier}: ${task.linear.status}${task.linear.stateName ? ` (${task.linear.stateName})` : ""}${task.linear.lastError ? ` — ${task.linear.lastError}` : ""}` : "";
+    return `${task.id.slice(0, 8)}  ${task.status.padEnd(19)}  ${task.role.padEnd(14)}  ${task.brief.title}${detail ? `\n  ${detail}` : ""}${linear}`;
   }).join("\n");
 }
 

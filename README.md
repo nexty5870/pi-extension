@@ -38,7 +38,7 @@ For Linear, install and authenticate the companion package directly:
 pi install npm:@alasano/pi-linear
 ```
 
-Use `/linear-auth` and `/linear-settings`; never paste a credential into chat. V2 does not wrap routine Linear reads or administration in implementation contracts. Destructive Linear operations and agent-driven workspace switching remain blocked.
+Use `/linear-auth` and `/linear-settings`; never paste a credential into chat. For Linear-backed implementation, the Lead binds `lead_delegate.linearIssue`, resolves the issue's canonical team workflow through pi-linear, updates only `stateId` to the team's started/In Progress state, and requires `linear_get_issue` readback. Local/GitHub-only work omits the binding and performs no Linear call. Missing auth or disabled tools never block worker startup; the lifecycle sync remains visible and retryable. V2 does not wrap routine Linear reads or administration in implementation contracts. Destructive Linear operations and agent-driven workspace switching remain blocked.
 
 The legacy implementation remains in `extensions/orchestration/` only for migration history and regression reference. It is no longer loaded by the package manifest. See [`docs/lead-worker-v2.md`](docs/lead-worker-v2.md) for architecture and validation.
 

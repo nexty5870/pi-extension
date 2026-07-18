@@ -94,7 +94,17 @@ This is a coordination boundary, not an operating-system sandbox. Use containers
 
 V2 does not own Linear authentication and does not route Linear through generic MCP. Install `@alasano/pi-linear`, authenticate with `/linear-auth`, and configure it with `/linear-settings`.
 
-Routine Linear reads, tracking, administration, and plan publication do not require implementation contracts. The Lead should pass the actual issue and acceptance criteria into delegated work. Deletes, archive operations, and workspace switching remain outside the extension boundary.
+Routine Linear reads, tracking, administration, and plan publication do not require implementation contracts. The Lead should pass the actual issue and acceptance criteria into delegated work.
+
+When an implementation is backed by Linear, `lead_delegate.linearIssue` stores an explicit issue binding. Once the visible worker is running, the Lead receives a lifecycle instruction that:
+
+1. reads the exact issue with `linear_get_issue`;
+2. resolves workflow states for that issue's canonical team with `linear_list_issue_statuses`;
+3. prefers the read-proven state named **In Progress**, otherwise the team's canonical state with type `started`;
+4. updates only that issue's `stateId` through `linear_update_issue`;
+5. reads the issue again and records success only after state type `started` is confirmed.
+
+The update runs in the Lead session; workers remain unable to mutate Linear. The binding is omitted for local/GitHub-only tasks. Disabled pi-linear tools, absent auth, and API/schema failures do not stop the worker or consume the desired lifecycle action: state remains visible as `pending`/`unavailable` and can be retried. Deletes, archive operations, and workspace switching remain outside the extension boundary.
 
 ## Local validation
 

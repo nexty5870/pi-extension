@@ -6,6 +6,16 @@ import { Type } from "typebox";
 import { LeadCoordinator, summarizeTasks, workerLabel } from "./coordinator.ts";
 import { isActionableWorkerState, pendingLeadEvents, workerEventMessage } from "./events.ts";
 import type { CommandExecutor } from "./git.ts";
+import {
+  LINEAR_START_TOOLS,
+  automaticLinearUpdateSafetyReason,
+  linearLifecycleAfterStatuses,
+  linearLifecycleAfterToolResult,
+  linearStartInstruction,
+  normalizeLinearIssueReference,
+  parseLinearIssueSnapshot,
+  parseLinearWorkflowStates,
+} from "./linear-lifecycle.ts";
 import { LEAD_SYSTEM_PROMPT } from "./prompt.ts";
 import { classifyBashRisk, isDestructiveLinearTool, isLinearMutationTool, riskDescription, sensitiveCommandReason, sensitivePathReason } from "./safety.ts";
 import { defaultLeadStateDir, LeadStore } from "./store.ts";
@@ -74,6 +84,16 @@ function textResult(text: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
+function resultText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => part !== null && typeof part === "object" ? part as Record<string, unknown> : undefined)
+    .filter((part): part is Record<string, unknown> => part !== undefined && part.type === "text")
+    .map((part) => typeof part.text === "string" ? part.text : "")
+    .join("\n")
+    .trim();
+}
+
 export default function leadExtension(pi: ExtensionAPI) {
   const workerTaskId = process.env.PI_LEAD_TASK_ID;
   const workerProjectId = process.env.PI_LEAD_PROJECT_ID;
@@ -92,6 +112,7 @@ export default function leadExtension(pi: ExtensionAPI) {
   const coordinator = new LeadCoordinator(store, execute, undefined, extensionPath);
   let dashboardTimer: ReturnType<typeof setInterval> | undefined;
   let leadWakeTimer: ReturnType<typeof setTimeout> | undefined;
+  let linearWakeTimer: ReturnType<typeof setTimeout> | undefined;
   let ciTimer: ReturnType<typeof setInterval> | undefined;
   let dashboardProjectId: string | undefined;
   let dashboardContext: ExtensionContext | undefined;
@@ -100,6 +121,61 @@ export default function leadExtension(pi: ExtensionAPI) {
   let inboxTimer: ReturnType<typeof setInterval> | undefined;
   let inboxContext: ExtensionContext | undefined;
   let inboxRunning = false;
+
+  const queueLinearLifecycle = async (task: TaskRecord, deliverAs: "steer" | "followUp"): Promise<{ task: TaskRecord; note: string }> => {
+    if (!task.linear || task.linear.status === "in-progress") return { task, note: "" };
+    const activeTools = new Set(pi.getActiveTools());
+    const missing = LINEAR_START_TOOLS.filter((tool) => !activeTools.has(tool));
+    if (missing.length > 0) {
+      const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
+        ...current,
+        status: "unavailable",
+        lastError: `Required pi-linear tools are disabled: ${missing.join(", ")}`,
+        updatedAt: new Date().toISOString(),
+      }));
+      return {
+        task: updated,
+        note: ` Linear lifecycle was not changed because required pi-linear tools are disabled (${missing.join(", ")}); worker startup continues.`,
+      };
+    }
+    try {
+      pi.sendMessage({
+        customType: "lead:linear-lifecycle",
+        content: linearStartInstruction(task),
+        display: true,
+        details: { taskId: task.id, issueIdentifier: task.linear.issueIdentifier },
+      }, { deliverAs, triggerTurn: true });
+      const now = new Date().toISOString();
+      const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
+        ...current,
+        status: current.status === "verifying" ? "verifying" : "pending",
+        promptedAt: now,
+        promptCount: (current.promptCount ?? 0) + 1,
+        lastError: undefined,
+        updatedAt: now,
+      }));
+      return {
+        task: updated,
+        note: ` Linear lifecycle sync for ${updated.linear?.issueIdentifier} is queued and requires verified pi-linear readback.`,
+      };
+    } catch (error) {
+      const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
+        ...current,
+        status: current.status === "verifying" ? "verifying" : "pending",
+        lastError: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString(),
+      }));
+      return { task: updated, note: " Linear lifecycle sync remains pending; worker startup is not blocked." };
+    }
+  };
+
+  const resumePendingLinearLifecycle = async () => {
+    if (!dashboardProjectId) return;
+    const tasks = await coordinator.list(dashboardProjectId);
+    for (const task of tasks.filter((candidate) => candidate.linear && candidate.linear.status !== "in-progress")) {
+      await queueLinearLifecycle(task, "followUp");
+    }
+  };
 
   const updateDashboard = async (emitEvents = false) => {
     if (dashboardUpdateRunning || !dashboardContext || !dashboardProjectId) return;
@@ -227,6 +303,8 @@ export default function leadExtension(pi: ExtensionAPI) {
     await updateDashboard(false);
     leadWakeTimer = setTimeout(() => void updateDashboard(true), 250);
     leadWakeTimer.unref();
+    linearWakeTimer = setTimeout(() => void resumePendingLinearLifecycle(), 500);
+    linearWakeTimer.unref();
     dashboardTimer = setInterval(() => void updateDashboard(true), DASHBOARD_INTERVAL_MS);
     ciTimer = setInterval(() => void refreshPendingPullRequests(), CI_INTERVAL_MS);
     dashboardTimer.unref();
@@ -236,14 +314,45 @@ export default function leadExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     if (dashboardTimer) clearInterval(dashboardTimer);
     if (leadWakeTimer) clearTimeout(leadWakeTimer);
+    if (linearWakeTimer) clearTimeout(linearWakeTimer);
     if (ciTimer) clearInterval(ciTimer);
     if (inboxTimer) clearInterval(inboxTimer);
     dashboardTimer = undefined;
     leadWakeTimer = undefined;
+    linearWakeTimer = undefined;
     ciTimer = undefined;
     inboxTimer = undefined;
     dashboardContext = undefined;
     inboxContext = undefined;
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (isWorker || !dashboardProjectId || !LINEAR_START_TOOLS.includes(event.toolName as typeof LINEAR_START_TOOLS[number])) return;
+    const tasks = await coordinator.list(dashboardProjectId);
+    if (event.toolName === "linear_list_issue_statuses") {
+      if (event.isError) return;
+      const states = parseLinearWorkflowStates(event.details, event.content);
+      for (const task of tasks.filter((candidate) =>
+        candidate.linear?.status !== "in-progress" && states.some((state) => state.team?.id === candidate.linear?.teamId))) {
+        await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
+          linearLifecycleAfterStatuses(current, states));
+      }
+      return;
+    }
+    const input = event.input as { issue?: unknown };
+    const inputIdentifier = normalizeLinearIssueReference(typeof input.issue === "string" ? input.issue : undefined);
+    const snapshot = parseLinearIssueSnapshot(event.details, event.content);
+    const identifier = snapshot?.identifier ?? inputIdentifier;
+    if (!identifier) return;
+    for (const task of tasks.filter((candidate) =>
+      candidate.linear?.issueIdentifier === identifier && candidate.linear.status !== "in-progress")) {
+      const before = task.linear!;
+      const updated = await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) =>
+        linearLifecycleAfterToolResult(current, event.toolName, snapshot, event.isError, resultText(event.content)));
+      if (before.status !== updated.linear?.status && updated.linear?.status === "in-progress") {
+        ctx.ui.notify(`${identifier} is verified In Progress in Linear`, "info");
+      }
+    }
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -252,6 +361,13 @@ export default function leadExtension(pi: ExtensionAPI) {
     }
     if (isWorker && isLinearMutationTool(event.toolName)) {
       return { block: true, reason: "Worker sessions cannot mutate Linear; report the requested tracking change to the Lead." };
+    }
+    if (!isWorker && dashboardProjectId && event.toolName === "linear_update_issue") {
+      const reason = automaticLinearUpdateSafetyReason(
+        await coordinator.list(dashboardProjectId),
+        event.input as Record<string, unknown>,
+      );
+      if (reason) return { block: true, reason };
     }
     if (["read", "write", "edit"].includes(event.toolName)) {
       const input = event.input as { path?: unknown; file_path?: unknown };
@@ -287,6 +403,7 @@ export default function leadExtension(pi: ExtensionAPI) {
       promptSnippet: "Delegate implementation, research, or independent review to a visible Pi worker",
       promptGuidelines: [
         "Use lead_delegate when a separate visible Pi context will help; include issue context and concrete acceptance criteria for issue-backed work.",
+        "When implementation is tied to Linear, pass linearIssue so the Lead updates it to the team's canonical started/In Progress state with pi-linear and verifies readback.",
         "Use a lead_delegate review worker with parentTaskId before accepting implementation work.",
       ],
       parameters: Type.Object({
@@ -294,13 +411,14 @@ export default function leadExtension(pi: ExtensionAPI) {
         task: Type.String({ minLength: 1, maxLength: 30_000 }),
         role: Type.Optional(RoleSchema),
         issue: Type.Optional(Type.String({ description: "Actual issue identifier, URL, title, and relevant description. Include enough context for an independent reviewer." })),
+        linearIssue: Type.Optional(Type.String({ description: "Exact Linear identifier (ENG-123) or linear.app issue URL when this implementation is Linear-backed. Omit for local/GitHub-only work." })),
         acceptanceCriteria: Type.Optional(Type.Array(Type.String(), { maxItems: 50 })),
         baseBranch: Type.Optional(Type.String()),
         parentTaskId: Type.Optional(Type.String({ description: "Required for review workers; implementation task ID or unique prefix." })),
         model: Type.Optional(Type.String({ description: "Optional Pi model pattern for this worker. Defaults to the Lead model." })),
       }),
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        const task = await coordinator.delegate(params, {
+        let task = await coordinator.delegate(params, {
           cwd: ctx.cwd,
           sessionFile: ctx.sessionManager.getSessionFile(),
           cmuxWorkspaceId: process.env.CMUX_WORKSPACE_ID,
@@ -310,9 +428,15 @@ export default function leadExtension(pi: ExtensionAPI) {
           signal,
           onStage: (stage) => onUpdate?.(textResult(stage)),
         });
+        let linearNote = "";
+        if (task.linear) {
+          const queued = await queueLinearLifecycle(task, "steer");
+          task = queued.task;
+          linearNote = queued.note;
+        }
         await updateDashboard(false);
         return textResult(
-          `Visible ${task.role} worker ${task.id.slice(0, 8)} is running in ${task.surface?.surfaceId}. The operator can inspect or type in that Pi session directly.`,
+          `Visible ${task.role} worker ${task.id.slice(0, 8)} is running in ${task.surface?.surfaceId}. The operator can inspect or type in that Pi session directly.${linearNote}`,
           { task },
         );
       },

@@ -32,7 +32,7 @@ Private task state, assignment prompts, launch scripts, and review packets live 
 
 Linear authentication belongs to [`@alasano/pi-linear`](https://github.com/alasano/house-of-pi/tree/master/packages/pi-linear). Operators use `/linear-auth` and `/linear-settings`; this repository does not read, copy, print, or migrate Linear credentials. Do not send a personal key to a generic hosted MCP endpoint.
 
-Routine Linear reads and administration do not require implementation contracts. Destructive tools and agent-driven workspace switching remain blocked by V2.
+Routine Linear reads and administration do not require implementation contracts. An explicit `linearIssue` binding on an implementation task may authorize only a Lead-side transition of that exact issue to a read-proven team state of type `started`: the Lead resolves canonical IDs with pi-linear, writes only `stateId`, and requires issue readback. Worker sessions cannot mutate Linear. Missing auth/tools never block worker startup. Destructive tools and agent-driven workspace switching remain blocked by V2.
 
 ## Legacy code
 

@@ -52,6 +52,7 @@ export function workerPrompt(task: TaskRecord, reviewPacketPath?: string): strin
       task.branchName ? `- Branch: ${task.branchName}` : "",
       task.baseSha ? `- Review base SHA: ${task.baseSha}` : "",
       task.parentTaskId ? `- Parent implementation task: ${task.parentTaskId}` : "",
+      task.linear ? `- Linear issue: ${task.linear.issueIdentifier} (lifecycle updates are owned by the Lead)` : "",
     ].filter(Boolean).join("\n")),
     "## Working agreement",
     "",
@@ -112,6 +113,8 @@ export const LEAD_SYSTEM_PROMPT = `You are the persistent Lead for this project.
 
 Delegate when a separate context is genuinely useful. Use lead_delegate for implementation, research, and independent review. Every delegated worker is a real visible Pi TUI in the caller's cmux workspace; the operator can inspect and intervene directly. Do not describe a sequential implementer/reviewer pair as a fleet. Multiple independent workers may run concurrently.
 
-For issue-backed work, give workers the actual issue context and acceptance criteria. Before accepting implementation, create an independent review worker so its packet includes the issue, criteria, exact diff, and validation evidence. Use lead_message_worker to steer an existing worker instead of replacing it unnecessarily. Use lead_update_worker only to reconcile state after direct operator intervention or a worker exit. Use lead_refresh_pr to distinguish pending, failed, green, and merged PR states.
+For issue-backed work, give workers the actual issue context and acceptance criteria. When an implementation comes from Linear, pass its exact identifier or URL in lead_delegate.linearIssue. Immediately follow the emitted Linear lifecycle instruction: use @alasano/pi-linear reads to resolve the issue's team and canonical started/In Progress state, update only that issue's stateId, and verify with linear_get_issue readback. Do not invent a Linear binding for local or GitHub-only work, and never block worker startup when Linear is absent or unavailable.
+
+Before accepting implementation, create an independent review worker so its packet includes the issue, criteria, exact diff, and validation evidence. Use lead_message_worker to steer an existing worker instead of replacing it unnecessarily. Use lead_update_worker only to reconcile state after direct operator intervention or a worker exit. Use lead_refresh_pr to distinguish pending, failed, green, and merged PR states.
 
 Implementation authorizes an isolated branch, commits, normal push, and PR preparation. It never implies merge, deployment, production mutation, force-push, destructive Linear operations, or unrelated changes. Merge and deployment require separate direct operator authorization.`;

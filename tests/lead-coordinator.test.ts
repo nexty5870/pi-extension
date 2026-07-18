@@ -105,16 +105,21 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     coordinator.delegate({ title: "Inspect tests", task: "Find the relevant tests.", role: "research" }, runtime),
   ]);
   assert.notEqual(research[0].surface?.surfaceId, research[1].surface?.surfaceId);
+  assert.equal(research[0].linear, undefined);
+  assert.equal(research[1].linear, undefined);
   assert.equal(harness.calls.filter((call) => call.command === "cmux" && call.args[0] === "new-pane").length, 1);
 
   const implementation = await coordinator.delegate({
     title: "Preserve imported record ownership",
     task: "Implement the issue completely and prepare a green PR.",
     issue: "APP-41 — Preserve ownership across imported records.",
+    linearIssue: "APP-41",
     acceptanceCriteria: ["Every imported record has an owner", "Parent records are synchronized", "Malformed input has regression coverage"],
   }, runtime);
   assert.equal(implementation.status, "running");
   assert.equal(implementation.leadObservedStatus, "running");
+  assert.equal(implementation.linear?.issueIdentifier, "APP-41");
+  assert.equal(implementation.linear?.status, "pending");
   assert.equal(implementation.surface?.workspaceId, "workspace:2");
   assert.ok(implementation.worktreePath.startsWith(store.root));
   const launch = await readFile(implementation.launchScriptPath!, "utf8");
@@ -168,6 +173,7 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     parentTaskId: implementation.id.slice(0, 8),
   }, runtime);
   assert.equal(review.status, "running");
+  assert.equal(review.linear, undefined);
   assert.equal(review.worktreePath, implementation.worktreePath);
   const packet = await readFile(join(store.taskArtifactDirectory(review.projectId, review.id), "review-packet.md"), "utf8");
   assert.match(packet, /APP-41/);

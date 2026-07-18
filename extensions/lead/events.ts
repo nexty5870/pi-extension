@@ -35,6 +35,7 @@ export function workerEventMessage(tasks: TaskRecord[]): string {
       handoff ? `Handoff:\n${handoff}` : undefined,
       task.review ? `Review: ${task.review.verdict}${task.review.findings.length ? `\n${task.review.findings.map((finding) => `- ${finding}`).join("\n")}` : ""}` : undefined,
       task.pullRequest?.url ? `PR: ${task.pullRequest.url}` : undefined,
+      task.linear ? `Linear ${task.linear.issueIdentifier}: ${task.linear.status}${task.linear.stateName ? ` (${task.linear.stateName})` : ""}` : undefined,
     ].filter((line): line is string => Boolean(line)).join("\n\n");
   });
   const message = [

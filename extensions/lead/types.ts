@@ -71,6 +71,25 @@ export interface WorkerMessage {
   deliveredAt?: string;
 }
 
+export interface LinearLifecycleState {
+  issueIdentifier: string;
+  desiredStateType: "started";
+  status: "pending" | "verifying" | "in-progress" | "unavailable";
+  attempts: number;
+  issueId?: string;
+  teamId?: string;
+  stateId?: string;
+  stateName?: string;
+  candidateStateId?: string;
+  candidateStateName?: string;
+  writeObservedAt?: string;
+  verifiedAt?: string;
+  promptedAt?: string;
+  promptCount?: number;
+  lastError?: string;
+  updatedAt: string;
+}
+
 export interface TaskRecord {
   schemaVersion: 2;
   id: string;
@@ -95,6 +114,7 @@ export interface TaskRecord {
   review?: ReviewEvidence;
   reviewTarget?: ReviewTarget;
   messages?: WorkerMessage[];
+  linear?: LinearLifecycleState;
   leadObservedStatus?: TaskStatus;
   leadObservedAt?: string;
   failure?: string;
