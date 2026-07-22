@@ -113,11 +113,13 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     thinking: "high",
   };
   const research = await Promise.all([
-    coordinator.delegate({ title: "Inspect API", task: "Find the API entry points.", role: "research" }, runtime),
+    coordinator.delegate({ title: "Inspect API", task: "Find the API entry points.", role: "research", thinking: "medium" }, runtime),
     coordinator.delegate({ title: "Inspect tests", task: "Find the relevant tests.", role: "research" }, runtime),
   ]);
   assert.notEqual(research[0].surface?.surfaceId, research[1].surface?.surfaceId);
   assert.equal(research[0].linear, undefined);
+  assert.equal(research[0].resolvedWorker?.thinking, "medium");
+  assert.match(await readFile(research[0].launchScriptPath!, "utf8"), /--thinking' 'medium'/);
   assert.equal(research[1].linear, undefined);
   assert.equal(harness.calls.filter((call) => call.command === "cmux" && call.args[0] === "new-pane").length, 1);
 
@@ -129,6 +131,8 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
     acceptanceCriteria: ["Every imported record has an owner", "Parent records are synchronized", "Malformed input has regression coverage"],
   }, runtime);
   assert.equal(implementation.status, "running");
+  assert.equal(implementation.resolvedWorker?.model, "anthropic/claude-sonnet-4-5");
+  assert.equal(implementation.resolvedWorker?.thinking, "high");
   assert.ok(implementation.workerStartedAt);
   assert.equal(implementation.leadObservedStatus, "running");
   assert.equal(implementation.linear?.issueIdentifier, "APP-41");
@@ -240,6 +244,7 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   assert.match(packet, /APP-41/);
   assert.match(packet, /Every imported record has an owner/);
   assert.match(packet, /npm test: passed/);
+  assert.match(packet, /Implementation worker model: anthropic\/claude-sonnet-4-5/);
   assert.match(packet, /-export const enabled = false/);
   assert.match(packet, /\+export const enabled = true/);
   const reviewLaunch = await readFile(review.launchScriptPath!, "utf8");

@@ -9,6 +9,16 @@ interface SurfaceList {
   surfaces?: Array<{ ref?: string }>;
 }
 
+interface SurfaceHealthList {
+  surfaces?: Array<{ ref?: string; in_window?: boolean }>;
+}
+
+export interface CmuxTopology {
+  paneIds: Set<string>;
+  surfacesByPane: Map<string, Set<string>>;
+  health: Map<string, "healthy" | "detached">;
+}
+
 function reference(output: string, kind: "pane" | "surface"): string | undefined {
   return output.match(new RegExp(`${kind}:[A-Za-z0-9-]+`))?.[0];
 }
@@ -53,6 +63,28 @@ export class CmuxWorkers {
       "--json",
     ], signal);
     return parseJson<SurfaceList>(output)?.surfaces ?? [];
+  }
+
+  async topology(signal?: AbortSignal): Promise<CmuxTopology> {
+    const panes = await this.panes(signal);
+    const surfacesByPane = new Map<string, Set<string>>();
+    for (const pane of panes ?? []) {
+      if (!pane.ref) continue;
+      // list-pane-surfaces is authoritative; surface_refs is only a fallback for
+      // older cmux versions that cannot return the per-pane JSON.
+      const listed = await this.surfaces(pane.ref, signal).catch(() =>
+        (pane.surface_refs ?? []).map((ref) => ({ ref })));
+      surfacesByPane.set(pane.ref, new Set((listed ?? []).map((surface) => surface.ref).filter((ref): ref is string => Boolean(ref))));
+    }
+    const healthOutput = await this.call(["surface-health", "--workspace", this.workspaceId], signal);
+    const healthRows = parseJson<SurfaceHealthList>(healthOutput)?.surfaces ?? [];
+    return {
+      paneIds: new Set((panes ?? []).map((pane) => pane.ref).filter((ref): ref is string => Boolean(ref))),
+      surfacesByPane,
+      health: new Map(healthRows.flatMap((surface) => surface.ref
+        ? [[surface.ref, surface.in_window === false ? "detached" as const : "healthy" as const]]
+        : [])),
+    };
   }
 
   async createSurface(
@@ -142,6 +174,15 @@ export class CmuxWorkers {
       surfaceId,
       "enter",
     ], signal);
+  }
+
+  async closeSurface(surfaceId: string, signal?: AbortSignal): Promise<void> {
+    await this.call(["close-surface", "--workspace", this.workspaceId, "--surface", surfaceId], signal);
+  }
+
+  /** Focus is intentionally available only to an explicit operator-selected action. */
+  async focusSurface(surfaceId: string, signal?: AbortSignal): Promise<void> {
+    await this.call(["focus-panel", "--workspace", this.workspaceId, "--panel", surfaceId], signal);
   }
 
   async flash(surfaceId?: string, signal?: AbortSignal): Promise<void> {

@@ -34,6 +34,14 @@ Every worker has:
 
 The worker is not a JSON subprocess and is not hidden behind a log tail. The operator may select its surface, inspect tool calls, type steering messages, abort work, or continue the conversation. Lead-to-worker steering is placed in a private shared inbox; the worker extension injects it as a Pi user message, so V2 never sends arbitrary task text into a terminal that may have exited back to a shell.
 
+### V2.1 runtime supervisor
+
+Semantic task status and process runtime truth are deliberately separate. Pi hooks drive `starting`, `busy`, `idle`, `stale`, `offline`, `detached`, and `needs-attention` telemetry with heartbeat/activity/report/settled timestamps, context use, runtime version, and cmux health. Timers begin only in `session_start` and stop idempotently in `session_shutdown`. Runtime heartbeat writes preserve semantic `task.updatedAt` and never create Lead events.
+
+A reportless `agent_settled` schedules one grace-period follow-up. If that follow-up also settles without `lead_worker_report`, the supervisor persists one ID-bearing runtime attention event; it never loops or infers completion. Context warnings default to 80%; at 92% the worker receives one durable-handoff request without changing semantic status.
+
+The Lead reconciles on startup/reload and every dashboard poll using persisted workspace/pane/surface IDs, `list-panes`, `list-pane-surfaces`, and `surface-health`. It never scrapes terminal text. Missing/non-windowed surfaces become resumable detached runtime records and each actionable transition wakes the Lead exactly once across reload. Only an explicit operator-selected `/workers` action calls a cmux focus command.
+
 ### Roles
 
 - **Implementation**: starts from the fetched default base when available, creates an isolated worktree and `pi/<slug>-<id>` branch, and retains full Pi shell/edit tools. Normal push and PR preparation are in scope.
@@ -76,11 +84,36 @@ State lives at:
 
 Directories are mode `0700`; state, assignments, and review packets are mode `0600`. Writes are atomic and cross-process task updates use short lock files.
 
-The Lead dashboard polls local task state. The footer status summarizes activity including unobserved events (for example `Lead · 5 active · 2 blocked · 3 events pending`), and the widget lists active workers with truncated blocked reasons for blocked/failed tasks. `/workers` opens a triage picker in interactive sessions: select a worker for its detail view (status, blocked reason, summary, handoff, PR, surface), then message it, mark it stopped, or dismiss its pending events. In non-TTY contexts (and inside worker sessions) `/workers` falls back to the plain status notification.
+The Lead dashboard polls local task and runtime state. It never presents an idle, stale, offline, or detached task as actively working merely because semantic status is `running`. The widget shows runtime state, context percentage, blockers, and pending events. `/workers` exposes details, inbox message/nudge, durable handoff request, explicit open/focus, graceful stop, exact-surface retirement, session resume, close-eligible, and event dismissal. Every action names its mutation scope; no action deletes a session file or worktree. In non-TTY contexts (and inside worker sessions) `/workers` falls back to the plain status notification.
 
 Every actionable status/review transition is first appended to a durable per-task outbox. Delivery uses a persisted lease, then injects one ID-bearing custom message into the persistent Lead session. The event remains unobserved until that exact ID appears in session entries; a later poll acknowledges the receipt. This closes the asynchronous send-before-ack window while preserving ordered `completed`, `blocked`, review, PR, failure, stop, and merge events across startup or `/reload`. Initial `running` is not a wake event because the active delegation turn already observes it.
 
 Pending PRs are observed with `gh pr view --json ...`; missing state, head, or check-rollup evidence fails closed as pending. A task becomes `pr-ready-ci-green` only when CI is green, the worktree is clean, the PR head matches the exact reviewed worker HEAD, implementation validation is complete/passing and unchanged since review, and an independent approval is bound to that HEAD, diff hash, and validation hash. Validation hashes cover check `name` + `status` only, so cosmetic re-reports (new CI run IDs, refreshed details) never invalidate a review. Greptile results in the GitHub check rollup become first-class check evidence on the task once they reach a terminal state — additive display/readiness evidence that never joins the review fingerprint, never satisfies validation completeness on its own, and never replaces the independent reviewer. Worker check re-reports keep the merged Greptile entries. The extension never merges.
+
+### Surface retention, capacity, and worker policy
+
+Terminal workers request graceful Pi shutdown after their durable report. Completed, merged, stopped, and observed-failed surfaces become reclaimable after retention only once runtime is offline; blocked workers are never auto-retired. Retirement closes the exact owned surface and retains both session and worktree. `maxVisibleSurfaces` is enforced with durable cross-process launch claims: eligible surfaces are reclaimed first, otherwise the assignment remains queued and launches on a later supervision poll. Detached or retired tasks resume the same Pi session ID in a fresh surface.
+
+Trusted policy lives in the project's private `project.json` under `workers` (not in repository configuration):
+
+```json
+{
+  "workers": {
+    "maxVisibleSurfaces": 6,
+    "heartbeatSeconds": 15,
+    "staleAfterSeconds": 120,
+    "idleReportGraceSeconds": 15,
+    "terminalSurfaceRetentionMinutes": 10,
+    "contextWarnPercent": 80,
+    "contextHandoffPercent": 92,
+    "default": { "inheritModel": true, "thinking": "high" },
+    "roles": { "research": { "thinking": "medium" } },
+    "models": [{ "pattern": "openai/gpt-5.6-sol", "thinking": "medium" }]
+  }
+}
+```
+
+Resolution is explicit delegation override, then matching resolved-model rule, role rule, project default, and finally inherited Lead settings. The resolved provider/model and thinking level are persisted and shown in status and review evidence. Pi performs model-capability clamping through `thinkingLevelMap`; this extension never mutates `models.json`.
 
 ## Authorization and safety
 

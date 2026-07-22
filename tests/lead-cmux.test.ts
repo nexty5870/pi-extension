@@ -14,6 +14,12 @@ class FakeExecutor {
     if (args[0] === "list-panes") {
       return { stdout: JSON.stringify({ panes: this.paneExists ? [{ ref: "pane:p2", surface_refs: ["surface:s2"] }] : [{ ref: "pane:caller" }] }), stderr: "", code: 0 };
     }
+    if (args[0] === "list-pane-surfaces") {
+      return { stdout: JSON.stringify({ surfaces: this.paneExists ? [{ ref: "surface:s2" }] : [] }), stderr: "", code: 0 };
+    }
+    if (args[0] === "surface-health") {
+      return { stdout: JSON.stringify({ surfaces: this.paneExists ? [{ ref: "surface:s2", in_window: true }] : [] }), stderr: "", code: 0 };
+    }
     if (args[0] === "new-pane") {
       this.paneExists = true;
       return { stdout: "pane:p2 surface:s2", stderr: "", code: 0 };
@@ -46,11 +52,25 @@ test("V2 cmux workers use one helper pane, visible Pi surfaces, and never steal 
   assert.equal(second.surface.surfaceId, "surface:s3");
 
   await cmux.launch(second.surface.surfaceId, "/tmp/a path/launch.sh");
+  const topology = await cmux.topology();
+  assert.ok(topology.paneIds.has("pane:p2"));
+  assert.equal(topology.health.get("surface:s2"), "healthy");
+  await cmux.closeSurface("surface:s3");
   const cmuxCalls = fake.calls.filter((call) => call.command === "cmux").map((call) => call.args);
   assert.ok(cmuxCalls.every((args) => args.includes("workspace:w1")));
   assert.ok(cmuxCalls.filter((args) => args[0] === "new-pane" || args[0] === "new-surface").every((args) => args.includes("false")));
   assert.ok(cmuxCalls.every((args) => !["select-workspace", "focus-pane", "focus-panel"].includes(args[0])));
+  assert.ok(cmuxCalls.some((args) => args[0] === "close-surface" && args.includes("surface:s3")));
   assert.ok(cmuxCalls.some((args) => args[0] === "send" && args.at(-1) === "exec '/tmp/a path/launch.sh'"));
+});
+
+test("cmux focus occurs only through the explicit focus method", async () => {
+  const fake = new FakeExecutor();
+  const cmux = new CmuxWorkers(fake.execute, "/tmp/example", "workspace:w1");
+  await cmux.flash("surface:s2");
+  assert.equal(fake.calls.some((call) => call.args[0] === "focus-panel"), false);
+  await cmux.focusSurface("surface:s2");
+  assert.ok(fake.calls.some((call) => call.args[0] === "focus-panel" && call.args.includes("surface:s2")));
 });
 
 test("shell quoting is safe for generated launch paths", () => {

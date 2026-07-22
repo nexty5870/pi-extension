@@ -144,6 +144,16 @@ export class LeadStore {
     return updated;
   }
 
+  async updateProject(projectId: string, update: (current: ProjectRecord) => ProjectRecord | Promise<ProjectRecord>): Promise<ProjectRecord> {
+    const path = this.projectPath(projectId);
+    return withFileLock(path, async () => {
+      const current = await readJson<ProjectRecord>(path);
+      const next = { ...(await update(current)), updatedAt: now() };
+      await atomicJson(path, next);
+      return next;
+    });
+  }
+
   async ensureProject(input: {
     projectRoot: string;
     projectName: string;
@@ -173,6 +183,8 @@ export class LeadStore {
         projectName: input.projectName,
         leadSessionFile: input.leadSessionFile ?? existing?.leadSessionFile,
         autoReview: existing?.autoReview,
+        workers: existing?.workers,
+        surfaceLaunchClaims: existing?.surfaceLaunchClaims,
         cmux,
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
@@ -218,6 +230,49 @@ export class LeadStore {
       const current = await readJson<TaskRecord>(path);
       const updatedAt = now();
       const next = appendLeadEvent(current, { ...(await update(current)), updatedAt }, updatedAt);
+      await atomicJson(path, next);
+      return next;
+    });
+  }
+
+  /** Runtime-only writes intentionally preserve task.updatedAt and never append semantic events. */
+  async updateRuntime(
+    projectId: string,
+    taskId: string,
+    update: (current: NonNullable<TaskRecord["runtime"]>, task: TaskRecord) => NonNullable<TaskRecord["runtime"]>,
+  ): Promise<TaskRecord> {
+    const path = this.taskPath(projectId, taskId);
+    return withFileLock(path, async () => {
+      const current = await readJson<TaskRecord>(path);
+      const runtime = update(current.runtime ?? { state: "starting" }, current);
+      const next = { ...current, runtime };
+      await atomicJson(path, next);
+      return next;
+    });
+  }
+
+  /** Append an actionable runtime wake once per stable reason key, across reload/process races. */
+  async runtimeAttention(
+    projectId: string,
+    taskId: string,
+    reasonKey: string,
+    reason: string,
+    state: "stale" | "offline" | "detached" | "needs-attention" = "needs-attention",
+  ): Promise<TaskRecord> {
+    const path = this.taskPath(projectId, taskId);
+    return withFileLock(path, async () => {
+      const current = await readJson<TaskRecord>(path);
+      const alreadyRecorded = (current.leadEvents ?? []).some((event) => event.kind === "runtime" && event.runtimeReasonKey === reasonKey);
+      const runtime = { ...(current.runtime ?? { state: "starting" as const }), state, attentionReason: reason };
+      const leadEvents = alreadyRecorded ? current.leadEvents : [...(current.leadEvents ?? []), {
+        id: randomUUID(),
+        kind: "runtime" as const,
+        status: current.status,
+        createdAt: now(),
+        summary: reason,
+        runtimeReasonKey: reasonKey,
+      }];
+      const next = { ...current, runtime, leadEvents };
       await atomicJson(path, next);
       return next;
     });
