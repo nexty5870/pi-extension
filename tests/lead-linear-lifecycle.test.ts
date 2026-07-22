@@ -8,6 +8,7 @@ import {
   linearLifecycleHasPendingWriteScope,
   linearLifecycleIsActionable,
   linearLifecycleMutationSafetyReason,
+  linearLifecycleNeedsQueuedLaunchPrompt,
   linearStartInstruction,
   normalizeLinearIssueReference,
   parseLinearIssueSnapshot,
@@ -120,6 +121,24 @@ test("automatic Linear writes require the exact read-proven state and no unrelat
   assert.match(linearLifecycleMutationSafetyReason([claimed], "linear_update_issue", { issue: "APP-41", stateId: "progress" }) ?? "", /in flight/);
   const verifying = taskWithLinear({ ...task.linear!, status: "verifying" });
   assert.match(linearLifecycleMutationSafetyReason([verifying], "linear_update_issue", { issue: "APP-41", stateId: "progress" }) ?? "", /readback/);
+});
+
+test("queued-to-running event retriggers Linear lifecycle exactly once after launch", () => {
+  const running = taskWithLinear();
+  const launched = {
+    ...running,
+    leadEvents: [{
+      id: "queued-launch",
+      kind: "runtime" as const,
+      status: "running" as const,
+      createdAt: new Date().toISOString(),
+      runtimeReasonKey: `queued-launched:${running.id}`,
+      runtimeState: "starting" as const,
+    }],
+  };
+  assert.equal(linearLifecycleNeedsQueuedLaunchPrompt(launched), true);
+  assert.equal(linearLifecycleNeedsQueuedLaunchPrompt({ ...launched, linear: { ...launched.linear!, queuedLaunchPromptedAt: new Date().toISOString() } }), false);
+  assert.equal(linearLifecycleNeedsQueuedLaunchPrompt(running), false);
 });
 
 test("Linear lifecycle is actionable only after a durable nonterminal worker start", () => {

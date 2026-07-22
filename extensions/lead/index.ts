@@ -13,6 +13,7 @@ import {
   linearLifecycleHasPendingWriteScope,
   linearLifecycleIsActionable,
   linearLifecycleMutationSafetyReason,
+  linearLifecycleNeedsQueuedLaunchPrompt,
   linearStartInstruction,
   normalizeLinearIssueReference,
   parseLinearIssueSnapshot,
@@ -61,7 +62,7 @@ const CI_INTERVAL_MS = 30_000;
 const RoleSchema = StringEnum(["implementation", "review", "research"] as const, {
   description: "Worker role. Review requires parentTaskId and shares that implementation worktree.",
 });
-const ThinkingSchema = StringEnum(["minimal", "low", "medium", "high", "xhigh", "max"] as const, {
+const ThinkingSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, {
   description: "Explicit Pi thinking override for this worker. Pi clamps it through the model's thinkingLevelMap.",
 });
 const WorkerStatusSchema = StringEnum([
@@ -231,12 +232,20 @@ export default function leadExtension(pi: ExtensionAPI) {
     }
   };
 
-  const updateDashboard = async (emitEvents = false) => {
+  const updateDashboard = async (emitEvents = false, forceTopology = false) => {
     if (dashboardUpdateRunning || !dashboardContext || !dashboardProjectId) return;
     dashboardUpdateRunning = true;
     const projectId = dashboardProjectId;
     try {
-      const tasks = await coordinator.supervise(projectId).catch(() => coordinator.list(projectId)).catch(() => []);
+      const tasks = await coordinator.supervise(projectId, undefined, forceTopology).catch(() => coordinator.list(projectId)).catch(() => []);
+      for (const task of tasks.filter(linearLifecycleNeedsQueuedLaunchPrompt)) {
+        await queueLinearLifecycle(task, "followUp");
+        await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
+          ...current,
+          queuedLaunchPromptedAt: current.queuedLaunchPromptedAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }));
+      }
       const active = tasks.filter((task) => !["completed", "failed", "stopped", "merged"].includes(task.status));
       const pendingCount = pendingLeadEvents(tasks).length;
       dashboardContext.ui.setStatus(STATUS_KEY, leadStatusSummary(tasks, pendingCount));
@@ -273,7 +282,7 @@ export default function leadExtension(pi: ExtensionAPI) {
         if (claimed) {
           const { task, event } = claimed;
           dashboardContext.ui.notify(
-            `${task.brief.title}: ${event.kind === "runtime" ? task.runtime?.state ?? "runtime attention" : event.status}${event.blockedReason ? ` — ${event.blockedReason}` : event.kind === "runtime" && event.summary ? ` — ${event.summary}` : ""}`,
+            `${task.brief.title}: ${event.kind === "runtime" ? event.runtimeState ?? task.runtime?.state ?? "runtime attention" : event.status}${event.blockedReason ? ` — ${event.blockedReason}` : event.kind === "runtime" && (event.runtimeReason ?? event.summary) ? ` — ${event.runtimeReason ?? event.summary}` : ""}`,
             event.status === "blocked" || event.status === "failed" ? "warning" : "info",
           );
           pi.sendMessage({
@@ -369,7 +378,7 @@ export default function leadExtension(pi: ExtensionAPI) {
     ctx.ui.setTitle(`Lead · ${context.git.name}`);
     dashboardProjectId = context.record.projectId;
     dashboardContext = ctx;
-    await updateDashboard(false);
+    await updateDashboard(false, true);
     leadWakeTimer = setTimeout(() => void updateDashboard(true), 250);
     leadWakeTimer.unref();
     linearWakeTimer = setTimeout(() => void resumePendingLinearLifecycle(), 500);
@@ -798,7 +807,7 @@ export default function leadExtension(pi: ExtensionAPI) {
           `Worker extension: ${extensionPath || "package discovery"}`,
           `Auto-review chain: ${context.record.autoReview === false ? "off (project opt-out)" : "on"}`,
           `Worker surfaces: max ${workerPolicy.maxVisibleSurfaces}, retain terminal ${workerPolicy.terminalSurfaceRetentionMinutes}m`,
-          `Worker runtime: heartbeat ${workerPolicy.heartbeatSeconds}s, stale ${workerPolicy.staleAfterSeconds}s, context ${workerPolicy.contextWarnPercent}%/${workerPolicy.contextHandoffPercent}%`,
+          `Worker runtime: heartbeat ${workerPolicy.heartbeatSeconds}s, stale ${workerPolicy.staleAfterSeconds}s, topology ${workerPolicy.supervisionSeconds}s, context ${workerPolicy.contextWarnPercent}%/${workerPolicy.contextHandoffPercent}%`,
           `State: ${store.root}`,
         ];
         ctx.ui.notify(lines.join("\n"), cmux.code === 0 && version.code === 0 ? "info" : "warning");

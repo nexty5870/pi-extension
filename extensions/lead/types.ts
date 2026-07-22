@@ -23,7 +23,7 @@ export const LEAD_EVENT_STATUSES = [
 export type WorkerRole = "implementation" | "review" | "research";
 export type WorkerRuntimeState = "starting" | "busy" | "idle" | "stale" | "offline" | "detached" | "needs-attention";
 export type WorkerSurfaceHealth = "healthy" | "missing" | "detached";
-export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface WorkerRuntime {
   state: WorkerRuntimeState;
@@ -48,6 +48,7 @@ export interface WorkerRuntime {
   retiredAt?: string;
   retiredSurfaceId?: string;
   surfaceTransitionKey?: string;
+  telemetryError?: string;
 }
 
 export interface WorkerSelection {
@@ -67,6 +68,7 @@ export interface WorkerPolicy {
   terminalSurfaceRetentionMinutes?: number;
   contextWarnPercent?: number;
   contextHandoffPercent?: number;
+  supervisionSeconds?: number;
   default?: WorkerSelection & { inheritModel?: boolean };
   roles?: Partial<Record<WorkerRole, WorkerSelection>>;
   models?: WorkerModelRule[];
@@ -159,6 +161,8 @@ export interface LeadTaskEvent {
   review?: ReviewEvidence;
   pullRequestUrl?: string;
   runtimeReasonKey?: string;
+  runtimeState?: WorkerRuntimeState;
+  runtimeReason?: string;
   linear?: {
     issueIdentifier: string;
     status: LinearLifecycleState["status"];
@@ -188,6 +192,7 @@ export interface LinearLifecycleState {
   promptCount?: number;
   promptClaimId?: string;
   promptClaimedAt?: string;
+  queuedLaunchPromptedAt?: string;
   lastError?: string;
   updatedAt: string;
 }

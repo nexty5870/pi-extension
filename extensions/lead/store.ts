@@ -245,6 +245,7 @@ export class LeadStore {
     return withFileLock(path, async () => {
       const current = await readJson<TaskRecord>(path);
       const runtime = update(current.runtime ?? { state: "starting" }, current);
+      if (JSON.stringify(runtime) === JSON.stringify(current.runtime)) return current;
       const next = { ...current, runtime };
       await atomicJson(path, next);
       return next;
@@ -264,6 +265,7 @@ export class LeadStore {
       const current = await readJson<TaskRecord>(path);
       const alreadyRecorded = (current.leadEvents ?? []).some((event) => event.kind === "runtime" && event.runtimeReasonKey === reasonKey);
       const runtime = { ...(current.runtime ?? { state: "starting" as const }), state, attentionReason: reason };
+      if (alreadyRecorded && JSON.stringify(runtime) === JSON.stringify(current.runtime)) return current;
       const leadEvents = alreadyRecorded ? current.leadEvents : [...(current.leadEvents ?? []), {
         id: randomUUID(),
         kind: "runtime" as const,
@@ -271,6 +273,8 @@ export class LeadStore {
         createdAt: now(),
         summary: reason,
         runtimeReasonKey: reasonKey,
+        runtimeState: state,
+        runtimeReason: reason,
       }];
       const next = { ...current, runtime, leadEvents };
       await atomicJson(path, next);

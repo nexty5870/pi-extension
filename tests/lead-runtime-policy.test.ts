@@ -147,6 +147,7 @@ test("worker policy precedence is explicit > model > role > project > Lead and v
   assert.equal(sol.modelId, "gpt-5.6-sol");
   assert.equal(sol.thinking, "medium");
   assert.equal(resolveWorkerPolicy(project, { role: "research", thinking: "minimal" }, lead).thinking, "minimal");
+  assert.equal(resolveWorkerPolicy(project, { role: "research", thinking: "off" }, lead).thinking, "off");
   assert.equal(resolveWorkerPolicy({ ...project, workers: undefined }, { role: "review" }, lead).thinking, "xhigh");
   const bounded = effectiveWorkerPolicy({ maxVisibleSurfaces: 0, heartbeatSeconds: 0, contextWarnPercent: 99, contextHandoffPercent: 50 });
   assert.equal(bounded.maxVisibleSurfaces, 1);

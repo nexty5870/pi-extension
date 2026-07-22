@@ -114,13 +114,15 @@ test("V2 delegates a visible implementation and gives review the issue, diff, cr
   };
   const research = await Promise.all([
     coordinator.delegate({ title: "Inspect API", task: "Find the API entry points.", role: "research", thinking: "medium" }, runtime),
-    coordinator.delegate({ title: "Inspect tests", task: "Find the relevant tests.", role: "research" }, runtime),
+    coordinator.delegate({ title: "Inspect tests", task: "Find the relevant tests.", role: "research", thinking: "off" }, runtime),
   ]);
   assert.notEqual(research[0].surface?.surfaceId, research[1].surface?.surfaceId);
   assert.equal(research[0].linear, undefined);
   assert.equal(research[0].resolvedWorker?.thinking, "medium");
   assert.match(await readFile(research[0].launchScriptPath!, "utf8"), /--thinking' 'medium'/);
   assert.equal(research[1].linear, undefined);
+  assert.equal(research[1].resolvedWorker?.thinking, "off");
+  assert.doesNotMatch(await readFile(research[1].launchScriptPath!, "utf8"), /--thinking/);
   assert.equal(harness.calls.filter((call) => call.command === "cmux" && call.args[0] === "new-pane").length, 1);
 
   const implementation = await coordinator.delegate({

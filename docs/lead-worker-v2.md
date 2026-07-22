@@ -40,7 +40,7 @@ Semantic task status and process runtime truth are deliberately separate. Pi hoo
 
 A reportless `agent_settled` schedules one grace-period follow-up. If that follow-up also settles without `lead_worker_report`, the supervisor persists one ID-bearing runtime attention event; it never loops or infers completion. Context warnings default to 80%; at 92% the worker receives one durable-handoff request without changing semantic status.
 
-The Lead reconciles on startup/reload and every dashboard poll using persisted workspace/pane/surface IDs, `list-panes`, `list-pane-surfaces`, and `surface-health`. It never scrapes terminal text. Missing/non-windowed surfaces become resumable detached runtime records and each actionable transition wakes the Lead exactly once across reload. Only an explicit operator-selected `/workers` action calls a cmux focus command.
+The Lead reconciles on startup/reload and on an independently throttled supervision cadence (15 seconds by default) using persisted workspace/pane/surface IDs, JSON `list-panes`, `list-pane-surfaces`, and `surface-health --json`. One topology snapshot is reused for each pass. Invalid/incomplete JSON fails closed: prior health is retained and an explicit telemetry error is recorded rather than mass-classifying surfaces as missing. It never scrapes terminal text. Missing/non-windowed surfaces become resumable detached runtime records and each actionable transition wakes the Lead exactly once across reload. Only an explicit operator-selected `/workers` action calls a cmux focus command.
 
 ### Roles
 
@@ -92,7 +92,9 @@ Pending PRs are observed with `gh pr view --json ...`; missing state, head, or c
 
 ### Surface retention, capacity, and worker policy
 
-Terminal workers request graceful Pi shutdown after their durable report. Completed, merged, stopped, and observed-failed surfaces become reclaimable after retention only once runtime is offline; blocked workers are never auto-retired. Retirement closes the exact owned surface and retains both session and worktree. `maxVisibleSurfaces` is enforced with durable cross-process launch claims: eligible surfaces are reclaimed first, otherwise the assignment remains queued and launches on a later supervision poll. Detached or retired tasks resume the same Pi session ID in a fresh surface.
+Terminal workers request graceful Pi shutdown after their durable report. Completed, merged, stopped, and observed-failed surfaces become reclaimable after retention only once runtime is offline; blocked workers are never auto-retired. Retirement closes the exact owned surface and retains both session and worktree. `maxVisibleSurfaces` is enforced with renewable five-minute cross-process launch claims: eligible surfaces are reclaimed first, otherwise the assignment remains queued and launches on a later supervision poll. Queued-to-running launches persist one Lead event and re-arm a pending Linear lifecycle prompt exactly once.
+
+Detached, missing-surface, and retired tasks can resume the same Pi `sessionId` in a fresh owned surface. Resume first takes a fresh exact topology/health snapshot. A healthy old surface refuses resume to avoid duplicate live Pi processes; a non-windowed old surface is closed by exact ID and verified absent, while an already-missing/retired surface is proven absent. Surface/runtime replacement is persisted atomically and session/worktree files remain untouched.
 
 Trusted policy lives in the project's private `project.json` under `workers` (not in repository configuration):
 
@@ -106,6 +108,7 @@ Trusted policy lives in the project's private `project.json` under `workers` (no
     "terminalSurfaceRetentionMinutes": 10,
     "contextWarnPercent": 80,
     "contextHandoffPercent": 92,
+    "supervisionSeconds": 15,
     "default": { "inheritModel": true, "thinking": "high" },
     "roles": { "research": { "thinking": "medium" } },
     "models": [{ "pattern": "openai/gpt-5.6-sol", "thinking": "medium" }]
@@ -113,7 +116,7 @@ Trusted policy lives in the project's private `project.json` under `workers` (no
 }
 ```
 
-Resolution is explicit delegation override, then matching resolved-model rule, role rule, project default, and finally inherited Lead settings. The resolved provider/model and thinking level are persisted and shown in status and review evidence. Pi performs model-capability clamping through `thinkingLevelMap`; this extension never mutates `models.json`.
+Resolution is explicit delegation override, then matching resolved-model rule, role rule, project default, and finally inherited Lead settings. The resolved provider/model and thinking level (including `off`) are persisted and shown in status and review evidence. `off` omits the launcher's `--thinking` flag. Pi performs model-capability clamping through `thinkingLevelMap`; this extension never mutates `models.json`.
 
 ## Authorization and safety
 

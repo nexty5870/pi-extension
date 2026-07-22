@@ -8,6 +8,7 @@ class FakeExecutor {
   calls: Array<{ command: string; args: string[] }> = [];
   paneExists = false;
   nextSurface = 2;
+  malformedHealth = false;
 
   execute: CommandExecutor = async (command, args) => {
     this.calls.push({ command, args });
@@ -18,7 +19,7 @@ class FakeExecutor {
       return { stdout: JSON.stringify({ surfaces: this.paneExists ? [{ ref: "surface:s2" }] : [] }), stderr: "", code: 0 };
     }
     if (args[0] === "surface-health") {
-      return { stdout: JSON.stringify({ surfaces: this.paneExists ? [{ ref: "surface:s2", in_window: true }] : [] }), stderr: "", code: 0 };
+      return { stdout: this.malformedHealth ? "not-json" : JSON.stringify({ surfaces: this.paneExists ? [{ ref: "surface:s2", in_window: true }] : [] }), stderr: "", code: 0 };
     }
     if (args[0] === "new-pane") {
       this.paneExists = true;
@@ -61,7 +62,16 @@ test("V2 cmux workers use one helper pane, visible Pi surfaces, and never steal 
   assert.ok(cmuxCalls.filter((args) => args[0] === "new-pane" || args[0] === "new-surface").every((args) => args.includes("false")));
   assert.ok(cmuxCalls.every((args) => !["select-workspace", "focus-pane", "focus-panel"].includes(args[0])));
   assert.ok(cmuxCalls.some((args) => args[0] === "close-surface" && args.includes("surface:s3")));
+  assert.ok(cmuxCalls.some((args) => JSON.stringify(args) === JSON.stringify(["surface-health", "--workspace", "workspace:w1", "--json"])));
   assert.ok(cmuxCalls.some((args) => args[0] === "send" && args.at(-1) === "exec '/tmp/a path/launch.sh'"));
+});
+
+test("malformed cmux health JSON fails closed instead of returning an empty topology", async () => {
+  const fake = new FakeExecutor();
+  fake.paneExists = true;
+  fake.malformedHealth = true;
+  const cmux = new CmuxWorkers(fake.execute, "/tmp/example", "workspace:w1");
+  await assert.rejects(() => cmux.topology(), /surface-health returned invalid JSON/);
 });
 
 test("cmux focus occurs only through the explicit focus method", async () => {

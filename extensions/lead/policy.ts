@@ -9,6 +9,7 @@ export const DEFAULT_WORKER_POLICY = Object.freeze({
   terminalSurfaceRetentionMinutes: 10,
   contextWarnPercent: 80,
   contextHandoffPercent: 92,
+  supervisionSeconds: 15,
 });
 
 export interface EffectiveWorkerPolicy extends WorkerPolicy {
@@ -19,6 +20,7 @@ export interface EffectiveWorkerPolicy extends WorkerPolicy {
   terminalSurfaceRetentionMinutes: number;
   contextWarnPercent: number;
   contextHandoffPercent: number;
+  supervisionSeconds: number;
 }
 
 function bounded(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
@@ -39,6 +41,7 @@ export function effectiveWorkerPolicy(policy?: WorkerPolicy): EffectiveWorkerPol
     terminalSurfaceRetentionMinutes: bounded(policy?.terminalSurfaceRetentionMinutes, DEFAULT_WORKER_POLICY.terminalSurfaceRetentionMinutes, 0, 10_080),
     contextWarnPercent: warn,
     contextHandoffPercent: handoff,
+    supervisionSeconds: bounded(policy?.supervisionSeconds, DEFAULT_WORKER_POLICY.supervisionSeconds, 2, 300),
   };
 }
 

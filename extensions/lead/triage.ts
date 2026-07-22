@@ -38,7 +38,7 @@ export function taskLine(task: TaskRecord): string {
       : isTerminalTaskStatus(task.status)
         ? "✓"
         : "◌";
-  const reason = task.runtime?.attentionReason ?? workerBlockedReason(task);
+  const reason = task.runtime?.attentionReason ?? task.runtime?.telemetryError ?? workerBlockedReason(task);
   const selection = task.resolvedWorker?.model
     ? ` · ${task.resolvedWorker.model}${task.resolvedWorker.thinking ? `/${task.resolvedWorker.thinking}` : ""}`
     : task.resolvedWorker?.thinking
@@ -65,6 +65,7 @@ export function triageDetail(task: TaskRecord): string {
     task.brief.title,
     reason ? `Blocked: ${truncateLine(reason, 240)}` : undefined,
     runtime?.attentionReason ? `Attention: ${truncateLine(runtime.attentionReason, 240)}` : undefined,
+    runtime?.telemetryError ? `Telemetry: ${truncateLine(runtime.telemetryError, 240)}` : undefined,
     runtime?.lastHeartbeatAt ? `Heartbeat: ${runtime.lastHeartbeatAt}` : undefined,
     runtime?.lastActivityAt ? `Activity: ${runtime.lastActivityAt}` : undefined,
     runtime?.lastReportAt ? `Report: ${runtime.lastReportAt}` : undefined,

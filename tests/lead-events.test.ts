@@ -50,6 +50,23 @@ test("persisted transitions remain ordered until each event is observed", () => 
   assert.deepEqual(pendingLeadEvents([task("pr-ready-ci-pending", "running", observed)]).map(({ event }) => event.id), ["ready-event"]);
 });
 
+test("runtime Lead event headers render runtime truth instead of semantic running", () => {
+  const timestamp = new Date().toISOString();
+  const runtimeEvent: LeadTaskEvent = {
+    id: "runtime-stale",
+    kind: "runtime",
+    status: "running",
+    createdAt: timestamp,
+    runtimeReasonKey: "stale:1",
+    runtimeState: "stale",
+    runtimeReason: "No deterministic heartbeat for 121s",
+  };
+  const message = workerEventMessage([{ task: task("running", "running", [runtimeEvent]), event: runtimeEvent, legacy: false }]);
+  assert.match(message, /research · stale/);
+  assert.match(message, /Runtime: No deterministic heartbeat for 121s/);
+  assert.doesNotMatch(message, /research · running/);
+});
+
 test("session custom messages provide idempotent delivery receipts", () => {
   const ids = deliveredLeadEventIds([
     { type: "custom_message", customType: "lead:worker-event", details: { eventIds: ["event-1", "event-2"] } },

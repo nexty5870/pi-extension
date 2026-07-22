@@ -162,6 +162,12 @@ export function linearLifecycleAfterStatuses(
   };
 }
 
+export function linearLifecycleNeedsQueuedLaunchPrompt(task: TaskRecord): boolean {
+  return linearLifecycleIsActionable(task)
+    && !task.linear?.queuedLaunchPromptedAt
+    && (task.leadEvents ?? []).some((event) => event.runtimeReasonKey === `queued-launched:${task.id}`);
+}
+
 export function linearLifecycleIsActionable(task: TaskRecord): boolean {
   return task.role === "implementation"
     && Boolean(task.linear)

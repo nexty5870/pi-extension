@@ -152,8 +152,11 @@ function taskStatusAfterReport(current: TaskRecord, input: WorkerReportInput): T
   return current.status;
 }
 
+const LAUNCH_CLAIM_LEASE_MS = 5 * 60_000;
+
 export class LeadCoordinator {
   private readonly git: GitWorktrees;
+  private readonly lastTopologyPollAt = new Map<string, number>();
 
   constructor(
     readonly store: LeadStore,
@@ -337,14 +340,14 @@ export class LeadCoordinator {
     return this.store.listTasks(projectId);
   }
 
-  private async launchTask(project: ProjectRecord, task: TaskRecord, signal?: AbortSignal): Promise<TaskRecord> {
+  private async launchTask(project: ProjectRecord, task: TaskRecord, signal?: AbortSignal, queuedLaunch = false): Promise<TaskRecord> {
     if (!project.cmux?.workspaceId || !task.launchScriptPath) throw new Error("Queued worker is missing cmux or launch script identity");
     if (task.surface) return task;
     const reserved = await this.store.updateProject(project.projectId, async (current) => {
       const tasks = await this.store.listTasks(project.projectId);
       const claims = Object.fromEntries(Object.entries(current.surfaceLaunchClaims ?? {}).filter(([, value]) => {
         const claimedAt = Date.parse(value);
-        return Number.isFinite(claimedAt) && Date.now() - claimedAt < 60_000;
+        return Number.isFinite(claimedAt) && Date.now() - claimedAt < LAUNCH_CLAIM_LEASE_MS;
       }));
       const visible = tasks.filter((candidate) => candidate.surface && candidate.launchState !== "retired" && candidate.runtime?.surfaceHealth !== "missing").length;
       if (!claims[task.id] && visible + Object.keys(claims).length >= effectiveWorkerPolicy(current.workers).maxVisibleSurfaces) {
@@ -357,7 +360,7 @@ export class LeadCoordinator {
     const claimId = createTaskId();
     const claimed = await this.store.updateTask(project.projectId, task.id, (current) => {
       const claimedAt = Date.parse(current.launchClaimedAt ?? "");
-      if (current.surface || (current.launchState === "launching" && Number.isFinite(claimedAt) && Date.now() - claimedAt < 60_000)) return current;
+      if (current.surface || (current.launchState === "launching" && Number.isFinite(claimedAt) && Date.now() - claimedAt < LAUNCH_CLAIM_LEASE_MS)) return current;
       return { ...current, launchState: "launching", launchClaimId: claimId, launchClaimedAt: timestamp() };
     });
     if (claimed.surface || claimed.launchClaimId !== claimId) return claimed;
@@ -367,34 +370,62 @@ export class LeadCoordinator {
       task.worktreePath,
       signal,
     );
+    const renewedAt = timestamp();
     await this.store.updateProject(project.projectId, (current) => ({
       ...current,
+      surfaceLaunchClaims: { ...(current.surfaceLaunchClaims ?? {}), [task.id]: renewedAt },
       cmux: current.cmux ? { ...current.cmux, helperPaneId: placement.helperPaneId } : current.cmux,
     }));
     let current = await this.store.updateTask(project.projectId, task.id, (value) => ({
       ...value,
       surface: placement.surface,
       launchState: "launching",
+      launchClaimedAt: value.launchClaimId === claimId ? renewedAt : value.launchClaimedAt,
+      runtime: {
+        ...(value.runtime ?? { state: "starting" }),
+        state: "starting",
+        surfaceHealth: "healthy",
+        telemetryError: undefined,
+        retiredAt: undefined,
+        retiredSurfaceId: undefined,
+      },
     }));
     await cmux.launch(placement.surface.surfaceId, task.launchScriptPath, signal);
-    current = await this.store.updateTask(project.projectId, task.id, (value) => ({
-      ...value,
-      status: "running",
-      launchState: "launched",
-      launchClaimId: undefined,
-      launchClaimedAt: undefined,
-      workerStartedAt: timestamp(),
-      leadObservedStatus: "running",
-      leadObservedAt: timestamp(),
-      failure: undefined,
-    }));
-    await this.store.updateRuntime(project.projectId, task.id, (runtime) => ({
-      ...runtime,
-      state: "starting",
-      surfaceHealth: "healthy",
-      retiredAt: undefined,
-      retiredSurfaceId: undefined,
-    }));
+    const launchedAt = timestamp();
+    const launchReasonKey = `queued-launched:${task.id}`;
+    current = await this.store.updateTask(project.projectId, task.id, (value) => {
+      const launchReason = `Queued worker launched exactly once in ${placement.surface.surfaceId}; runtime is starting${value.linear ? ` and Linear ${value.linear.issueIdentifier} lifecycle is ready to resume` : ""}`;
+      const hasLaunchEvent = (value.leadEvents ?? []).some((event) => event.runtimeReasonKey === launchReasonKey);
+      return {
+        ...value,
+        status: "running",
+        launchState: "launched",
+        launchClaimId: undefined,
+        launchClaimedAt: undefined,
+        workerStartedAt: launchedAt,
+        leadObservedStatus: "running",
+        leadObservedAt: launchedAt,
+        failure: undefined,
+        runtime: {
+          ...(value.runtime ?? { state: "starting" }),
+          state: "starting",
+          surfaceHealth: "healthy",
+          telemetryError: undefined,
+          retiredAt: undefined,
+          retiredSurfaceId: undefined,
+        },
+        leadEvents: queuedLaunch && !hasLaunchEvent ? [...(value.leadEvents ?? []), {
+          id: createTaskId(),
+          kind: "runtime" as const,
+          status: "running" as const,
+          createdAt: launchedAt,
+          summary: launchReason,
+          runtimeReasonKey: launchReasonKey,
+          runtimeState: "starting" as const,
+          runtimeReason: launchReason,
+        }] : value.leadEvents,
+      };
+    });
     await cmux.setTaskStatus(task.id, "running", signal);
     await this.store.updateProject(project.projectId, (value) => {
       const claims = { ...(value.surfaceLaunchClaims ?? {}) };
@@ -408,7 +439,17 @@ export class LeadCoordinator {
     const project = await this.store.readProject(projectId);
     if (!project?.cmux?.workspaceId) return this.store.listTasks(projectId);
     const cmux = new CmuxWorkers(this.execute, project.projectRoot, project.cmux.workspaceId);
-    const topology = await cmux.topology(signal);
+    let topology: Awaited<ReturnType<CmuxWorkers["topology"]>>;
+    try {
+      topology = await cmux.topology(signal);
+    } catch (error) {
+      const telemetryError = `cmux topology unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      const tasks = await this.store.listTasks(projectId);
+      for (const task of tasks.filter((candidate) => Boolean(candidate.surface) && candidate.launchState !== "retired")) {
+        await this.store.updateRuntime(projectId, task.id, (runtime) => ({ ...runtime, telemetryError }));
+      }
+      return this.store.listTasks(projectId);
+    }
     if (project.cmux.helperPaneId && !topology.paneIds.has(project.cmux.helperPaneId)) {
       await this.store.updateProject(projectId, (current) => ({
         ...current,
@@ -428,6 +469,7 @@ export class LeadCoordinator {
         await this.store.updateRuntime(projectId, task.id, (runtime) => ({
           ...runtime,
           surfaceHealth: "healthy",
+          telemetryError: undefined,
           state: runtime.state === "detached" ? "idle" : runtime.state,
           attentionReason: runtime.state === "detached" ? undefined : runtime.attentionReason,
           surfaceTransitionKey: undefined,
@@ -439,8 +481,10 @@ export class LeadCoordinator {
         const transitionKey = task.runtime?.surfaceHealth === health && task.runtime.surfaceTransitionKey
           ? task.runtime.surfaceTransitionKey
           : `surface:${health}:${task.surface.surfaceId}:${timestamp()}`;
-        await this.store.updateRuntime(projectId, task.id, (runtime) => ({ ...runtime, surfaceHealth: health, surfaceTransitionKey: transitionKey }));
+        await this.store.updateRuntime(projectId, task.id, (runtime) => ({ ...runtime, surfaceHealth: health, surfaceTransitionKey: transitionKey, telemetryError: undefined }));
         await this.store.runtimeAttention(projectId, task.id, transitionKey, reason, "detached");
+      } else {
+        await this.store.updateRuntime(projectId, task.id, (runtime) => ({ ...runtime, surfaceHealth: health, telemetryError: undefined }));
       }
     }
     return this.store.listTasks(projectId);
@@ -462,11 +506,18 @@ export class LeadCoordinator {
     return closed;
   }
 
-  async supervise(projectId: string, signal?: AbortSignal): Promise<TaskRecord[]> {
-    let tasks = await this.reconcile(projectId, signal);
+  async supervise(projectId: string, signal?: AbortSignal, forceTopology = false): Promise<TaskRecord[]> {
     const project = await this.store.readProject(projectId);
-    if (!project) return tasks;
+    if (!project) return this.store.listTasks(projectId);
     const policy = effectiveWorkerPolicy(project.workers);
+    const lastPoll = this.lastTopologyPollAt.get(projectId) ?? 0;
+    let tasks: TaskRecord[];
+    if (forceTopology || Date.now() - lastPoll >= policy.supervisionSeconds * 1_000) {
+      this.lastTopologyPollAt.set(projectId, Date.now());
+      tasks = await this.reconcile(projectId, signal);
+    } else {
+      tasks = await this.store.listTasks(projectId);
+    }
     const nowMs = Date.now();
     for (const task of tasks) {
       if (!isTerminalTaskStatus(task.status) && task.workerStartedAt && task.runtime?.state === "offline"
@@ -483,10 +534,15 @@ export class LeadCoordinator {
     await this.reclaimEligible(project, signal);
     tasks = await this.store.listTasks(projectId);
     let visible = tasks.filter((task) => task.surface && task.launchState !== "retired" && task.runtime?.surfaceHealth !== "missing").length;
-    for (const queued of tasks.filter((task) => task.launchState === "queued" && Boolean(task.launchScriptPath)).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    for (const queued of tasks.filter((task) => {
+      if (!task.launchScriptPath) return false;
+      if (task.launchState === "queued") return true;
+      const claimedAt = Date.parse(task.launchClaimedAt ?? "");
+      return task.launchState === "launching" && (!Number.isFinite(claimedAt) || Date.now() - claimedAt >= LAUNCH_CLAIM_LEASE_MS);
+    }).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       if (visible >= policy.maxVisibleSurfaces) break;
-      await this.launchTask(await this.store.readProject(projectId) ?? project, queued, signal);
-      visible++;
+      const launched = await this.launchTask(await this.store.readProject(projectId) ?? project, queued, signal, true);
+      if (launched.surface && launched.launchState === "launched") visible++;
     }
     return this.store.listTasks(projectId);
   }
@@ -516,34 +572,66 @@ export class LeadCoordinator {
       return task;
     }
     const surfaceId = task.surface.surfaceId;
-    await this.store.updateRuntime(projectId, task.id, (runtime) => ({
-      ...runtime,
-      state: "offline",
-      surfaceHealth: "missing",
-      retiredAt: timestamp(),
-      retiredSurfaceId: surfaceId,
+    const retiredAt = timestamp();
+    return this.store.updateTask(projectId, task.id, (current) => ({
+      ...current,
+      surface: undefined,
+      launchState: "retired",
+      runtime: {
+        ...(current.runtime ?? { state: "offline" }),
+        state: "offline",
+        surfaceHealth: "missing",
+        retiredAt,
+        retiredSurfaceId: surfaceId,
+      },
     }));
-    return this.store.updateTask(projectId, task.id, (current) => ({ ...current, surface: undefined, launchState: "retired" }));
   }
 
   async resume(projectId: string, taskId: string, signal?: AbortSignal): Promise<TaskRecord> {
     const project = await this.store.readProject(projectId);
-    if (!project) throw new Error("Lead project is unavailable");
+    if (!project?.cmux?.workspaceId) throw new Error("Lead project cmux identity is unavailable");
     const task = await this.store.requireTask(projectId, taskId);
     if (!task.launchScriptPath) throw new Error("Worker has no persisted launch script to resume");
-    if (task.workerStartedAt && task.runtime?.state !== "offline") {
-      throw new Error("Gracefully stop the existing Pi runtime and wait for offline state before resuming its session in a fresh surface");
+
+    // A stale semantic/runtime label is never enough to launch a second Pi. A
+    // fresh exact topology + health snapshot must prove the old owned surface
+    // absent or non-windowed. Non-windowed surfaces are closed by exact ID and
+    // verified absent before the persistent session ID is launched again.
+    const cmux = new CmuxWorkers(this.execute, task.worktreePath, project.cmux.workspaceId);
+    const storedSurfaceId = task.surface?.surfaceId ?? task.runtime?.retiredSurfaceId;
+    let topology = await cmux.topology(signal);
+    const contains = (surfaceId: string) => [...topology.surfacesByPane.values()].some((surfaces) => surfaces.has(surfaceId));
+    if (storedSurfaceId && (contains(storedSurfaceId) || topology.health.has(storedSurfaceId))) {
+      if (topology.health.get(storedSurfaceId) !== "detached") {
+        throw new Error(`Refusing to resume while owned surface ${storedSurfaceId} is still live and healthy`);
+      }
+      await cmux.closeSurface(storedSurfaceId, signal);
+      topology = await cmux.topology(signal);
+      if ([...topology.surfacesByPane.values()].some((surfaces) => surfaces.has(storedSurfaceId)) || topology.health.has(storedSurfaceId)) {
+        throw new Error(`Refusing to resume because detached surface ${storedSurfaceId} could not be retired exactly`);
+      }
+    } else if (!storedSurfaceId && task.launchState !== "retired") {
+      throw new Error("Refusing to resume without a persisted old surface identity or retired-session record");
     }
-    if (task.surface && task.runtime?.surfaceHealth === "detached") {
-      await new CmuxWorkers(this.execute, task.worktreePath, task.surface.workspaceId).closeSurface(task.surface.surfaceId, signal).catch(() => undefined);
-    }
+
     await this.reclaimEligible(project, signal);
+    const queued = await this.store.updateTask(projectId, task.id, (current) => ({
+      ...current,
+      surface: undefined,
+      launchState: "queued",
+      runtime: {
+        ...(current.runtime ?? { state: "offline" }),
+        state: "offline",
+        surfaceHealth: "missing",
+        telemetryError: undefined,
+        retiredSurfaceId: storedSurfaceId ?? current.runtime?.retiredSurfaceId,
+      },
+    }));
     const tasks = await this.store.listTasks(projectId);
-    if (tasks.filter((candidate) => candidate.surface && candidate.launchState !== "retired" && candidate.runtime?.surfaceHealth !== "missing").length >= effectiveWorkerPolicy(project.workers).maxVisibleSurfaces) {
-      return this.store.updateTask(projectId, task.id, (current) => ({ ...current, surface: undefined, launchState: "queued" }));
+    if (tasks.filter((candidate) => candidate.id !== task.id && candidate.surface && candidate.launchState !== "retired" && candidate.runtime?.surfaceHealth !== "missing").length >= effectiveWorkerPolicy(project.workers).maxVisibleSurfaces) {
+      return queued;
     }
-    await this.store.updateTask(projectId, task.id, (current) => ({ ...current, surface: undefined, launchState: "queued" }));
-    return this.launchTask(project, await this.store.requireTask(projectId, task.id), signal);
+    return this.launchTask(await this.store.readProject(projectId) ?? project, queued, signal, true);
   }
 
   async focus(projectId: string, taskId: string, signal?: AbortSignal): Promise<void> {
