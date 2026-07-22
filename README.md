@@ -15,8 +15,11 @@ One persistent **Lead** Pi session coordinates real, interactive Pi workers in t
 - Implementation workers receive isolated Git worktrees, full shell access, persistent named sessions, and the project's skills/extensions.
 - Research workers are visible and read-only.
 - Review workers share an implementation worktree and receive the issue, acceptance criteria, exact diff, and validation evidence.
-- Multiple independent workers can run concurrently in tabs inside one non-focus-stealing helper pane.
-- Completed, blocked, review, and PR transitions enter a durable ID-bearing outbox and wake the Lead exactly once per persisted event, including across `/reload`.
+- Multiple independent workers can run concurrently in tabs inside one non-focus-stealing helper pane; a configurable cap queues overflow and launches it when capacity opens.
+- Pi lifecycle hooks record busy/idle/stale/offline/detached/attention state, timestamps, context use, runtime version, and exact cmux surface health separately from semantic task status.
+- A reportless settled worker receives one automatic report nudge; a second reportless settle creates one durable attention wake without loops or inferred completion.
+- Completed, blocked, review, PR, and actionable runtime transitions enter a durable ID-bearing outbox and wake the Lead exactly once per persisted event, including across `/reload`; heartbeats never wake it.
+- Terminal workers shut down gracefully and eligible exact surfaces retire after retention. Detached/missing/retired sessions resume only after exact topology/health proof prevents a duplicate live Pi; session files/worktrees remain intact, and blocked workers are never auto-retired.
 - Durable states distinguish `running`, `blocked`, `pr-ready-ci-pending`, `pr-ready-ci-green`, `completed`, `failed`, and `merged`.
 - Pending PRs are polled through `gh pr view`; green requires complete GitHub evidence plus an approved review bound to the unchanged diff, exact head, and unchanged passing validation.
 
@@ -25,12 +28,14 @@ Natural implementation intent is enough to delegate work. There is no contract d
 Useful optional commands:
 
 ```text
-/workers                         Show all durable worker states
+/workers                         Inspect/triage runtime, handoff, focus, stop, retire, and resume
 /worker-message <id> <message>  Steer an existing worker without changing focus
 /lead-doctor                     Check Git, Pi, cmux, caller IDs, and state path
 ```
 
-The Lead also has `lead_workers`, `lead_message_worker`, `lead_update_worker`, and `lead_refresh_pr` tools. Lead messages use a shared inbox consumed by the live worker extension—not keystrokes sent blindly to a terminal. Workers report blockers, checks, handoffs, PR state, and review evidence with `lead_worker_report`. State and private review packets live under `~/.pi/lead-orchestration/` with private permissions. Successful worktrees and live sessions are not silently deleted.
+The Lead also has `lead_workers`, `lead_message_worker`, `lead_update_worker`, and `lead_refresh_pr` tools. Lead messages use a shared inbox consumed by the live worker extension—not keystrokes sent blindly to a terminal. `/workers` only changes focus after the operator explicitly selects open/focus, and each action states whether it mutates durable state, Pi, or cmux. Workers report blockers, checks, handoffs, PR state, and review evidence with `lead_worker_report`. State and private review packets live under `~/.pi/lead-orchestration/` with private permissions. Successful worktrees and sessions are never automatically deleted.
+
+`lead_delegate` accepts per-worker `model` and `thinking` overrides, including `off`. Trusted private project policy supports project defaults, role rules, and model-pattern rules (explicit > model > role > project > inherited Lead). Resolved model/thinking is persisted and displayed; for example `openai/gpt-5.6-sol` can use `medium` while the Lead uses another level. Pi capability-clamps the level without any global `models.json` mutation. Exact JSON cmux health reconciliation is throttled independently (15 seconds by default) and fails closed without erasing last-known health. See [`docs/lead-worker-v2.md`](docs/lead-worker-v2.md) for lifecycle defaults and configuration.
 
 For Linear, install and authenticate the companion package directly:
 

@@ -9,15 +9,25 @@ interface SurfaceList {
   surfaces?: Array<{ ref?: string }>;
 }
 
+interface SurfaceHealthList {
+  surfaces?: Array<{ ref?: string; in_window?: boolean }>;
+}
+
+export interface CmuxTopology {
+  paneIds: Set<string>;
+  surfacesByPane: Map<string, Set<string>>;
+  health: Map<string, "healthy" | "detached">;
+}
+
 function reference(output: string, kind: "pane" | "surface"): string | undefined {
   return output.match(new RegExp(`${kind}:[A-Za-z0-9-]+`))?.[0];
 }
 
-function parseJson<T>(value: string): T | undefined {
+function parseJson<T>(value: string, command: string): T {
   try {
     return JSON.parse(value) as T;
-  } catch {
-    return undefined;
+  } catch (error) {
+    throw new Error(`cmux ${command} returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -40,7 +50,9 @@ export class CmuxWorkers {
 
   private async panes(signal?: AbortSignal): Promise<PaneList["panes"]> {
     const output = await this.call(["list-panes", "--workspace", this.workspaceId, "--json"], signal);
-    return parseJson<PaneList>(output)?.panes ?? [];
+    const parsed = parseJson<PaneList>(output, "list-panes");
+    if (!Array.isArray(parsed.panes)) throw new Error("cmux list-panes JSON omitted panes");
+    return parsed.panes;
   }
 
   private async surfaces(paneId: string, signal?: AbortSignal): Promise<SurfaceList["surfaces"]> {
@@ -52,7 +64,35 @@ export class CmuxWorkers {
       paneId,
       "--json",
     ], signal);
-    return parseJson<SurfaceList>(output)?.surfaces ?? [];
+    const parsed = parseJson<SurfaceList>(output, "list-pane-surfaces");
+    if (!Array.isArray(parsed.surfaces)) throw new Error("cmux list-pane-surfaces JSON omitted surfaces");
+    return parsed.surfaces;
+  }
+
+  async topology(signal?: AbortSignal): Promise<CmuxTopology> {
+    const panes = await this.panes(signal);
+    const surfacesByPane = new Map<string, Set<string>>();
+    for (const pane of panes ?? []) {
+      if (!pane.ref) continue;
+      // list-pane-surfaces is authoritative. Parse/command failure aborts the
+      // snapshot rather than converting every known worker into "missing".
+      const listed = await this.surfaces(pane.ref, signal);
+      surfacesByPane.set(pane.ref, new Set((listed ?? []).map((surface) => surface.ref).filter((ref): ref is string => Boolean(ref))));
+    }
+    const healthOutput = await this.call(["surface-health", "--workspace", this.workspaceId, "--json"], signal);
+    const parsedHealth = parseJson<SurfaceHealthList>(healthOutput, "surface-health");
+    if (!Array.isArray(parsedHealth.surfaces)) throw new Error("cmux surface-health JSON omitted surfaces");
+    const health = new Map(parsedHealth.surfaces.flatMap((surface) => surface.ref
+      ? [[surface.ref, surface.in_window === false ? "detached" as const : "healthy" as const]]
+      : []));
+    const listedSurfaceIds = [...surfacesByPane.values()].flatMap((surfaces) => [...surfaces]);
+    const missingHealth = listedSurfaceIds.filter((surfaceId) => !health.has(surfaceId));
+    if (missingHealth.length > 0) throw new Error(`cmux surface-health omitted listed surfaces: ${missingHealth.join(", ")}`);
+    return {
+      paneIds: new Set((panes ?? []).map((pane) => pane.ref).filter((ref): ref is string => Boolean(ref))),
+      surfacesByPane,
+      health,
+    };
   }
 
   async createSurface(
@@ -142,6 +182,15 @@ export class CmuxWorkers {
       surfaceId,
       "enter",
     ], signal);
+  }
+
+  async closeSurface(surfaceId: string, signal?: AbortSignal): Promise<void> {
+    await this.call(["close-surface", "--workspace", this.workspaceId, "--surface", surfaceId], signal);
+  }
+
+  /** Focus is intentionally available only to an explicit operator-selected action. */
+  async focusSurface(surfaceId: string, signal?: AbortSignal): Promise<void> {
+    await this.call(["focus-panel", "--workspace", this.workspaceId, "--panel", surfaceId], signal);
   }
 
   async flash(surfaceId?: string, signal?: AbortSignal): Promise<void> {

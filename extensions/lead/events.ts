@@ -65,12 +65,13 @@ export function deliveredLeadEventIds(entries: unknown[]): Set<string> {
 
 export function workerEventMessage(events: PendingLeadEvent[]): string {
   const sections = events.map(({ task, event }) => {
-    const summary = clip(event.summary);
+    const summary = event.kind === "runtime" && event.runtimeReason ? undefined : clip(event.summary);
     const handoff = clip(event.handoff);
     return [
-      `## ${task.id.slice(0, 8)} · ${task.role} · ${event.status}${event.kind === "review" ? " · review" : ""}`,
+      `## ${task.id.slice(0, 8)} · ${task.role} · ${event.kind === "runtime" ? event.runtimeState ?? task.runtime?.state ?? "runtime" : event.status}${event.kind === "review" ? " · review" : ""}`,
       `**${task.brief.title}**`,
       event.blockedReason ? `Blocked: ${event.blockedReason}` : undefined,
+      event.kind === "runtime" && event.runtimeReason ? `Runtime: ${event.runtimeReason}` : undefined,
       summary ? `Summary:\n${summary}` : undefined,
       handoff ? `Handoff:\n${handoff}` : undefined,
       event.review ? `Review: ${event.review.verdict}${event.review.findings.length ? `\n${event.review.findings.map((finding) => `- ${finding}`).join("\n")}` : ""}` : undefined,

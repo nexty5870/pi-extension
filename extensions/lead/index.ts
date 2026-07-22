@@ -13,13 +13,16 @@ import {
   linearLifecycleHasPendingWriteScope,
   linearLifecycleIsActionable,
   linearLifecycleMutationSafetyReason,
+  linearLifecycleNeedsQueuedLaunchPrompt,
   linearStartInstruction,
   normalizeLinearIssueReference,
   parseLinearIssueSnapshot,
   parseLinearWorkflowStates,
   linearStatusFilterTeamId,
 } from "./linear-lifecycle.ts";
+import { effectiveWorkerPolicy } from "./policy.ts";
 import { LEAD_SYSTEM_PROMPT } from "./prompt.ts";
+import { WorkerRuntimeController } from "./runtime.ts";
 import {
   classifyBashRisk,
   isDestructiveLinearTool,
@@ -36,13 +39,18 @@ import {
   leadStatusSummary,
   taskLine,
   TRIAGE_ACTION_BACK,
+  TRIAGE_ACTION_CLOSE_ELIGIBLE,
   TRIAGE_ACTION_DISMISS,
+  TRIAGE_ACTION_FOCUS,
+  TRIAGE_ACTION_HANDOFF,
   TRIAGE_ACTION_MESSAGE,
+  TRIAGE_ACTION_RESUME,
+  TRIAGE_ACTION_RETIRE,
   TRIAGE_ACTION_STOP,
   triageActions,
   triageDetail,
 } from "./triage.ts";
-import type { TaskRecord, WorkerRole } from "./types.ts";
+import { isTerminalTaskStatus, type TaskRecord, type WorkerRole } from "./types.ts";
 
 declare const __filename: string;
 
@@ -53,6 +61,9 @@ const CI_INTERVAL_MS = 30_000;
 
 const RoleSchema = StringEnum(["implementation", "review", "research"] as const, {
   description: "Worker role. Review requires parentTaskId and shares that implementation worktree.",
+});
+const ThinkingSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, {
+  description: "Explicit Pi thinking override for this worker. Pi clamps it through the model's thinkingLevelMap.",
 });
 const WorkerStatusSchema = StringEnum([
   "running",
@@ -138,6 +149,7 @@ export default function leadExtension(pi: ExtensionAPI) {
   let inboxContext: ExtensionContext | undefined;
   let inboxRunning = false;
   const linearPromptsInFlight = new Set<string>();
+  let runtimeController: WorkerRuntimeController | undefined;
   const linearStatesByTeam = new Map<string, { states: ReturnType<typeof parseLinearWorkflowStates>; observedAt: number }>();
 
   const queueLinearLifecycle = async (task: TaskRecord, deliverAs: "steer" | "followUp"): Promise<{ task: TaskRecord; note: string }> => {
@@ -220,11 +232,20 @@ export default function leadExtension(pi: ExtensionAPI) {
     }
   };
 
-  const updateDashboard = async (emitEvents = false) => {
+  const updateDashboard = async (emitEvents = false, forceTopology = false) => {
     if (dashboardUpdateRunning || !dashboardContext || !dashboardProjectId) return;
     dashboardUpdateRunning = true;
+    const projectId = dashboardProjectId;
     try {
-      const tasks = await coordinator.list(dashboardProjectId).catch(() => []);
+      const tasks = await coordinator.supervise(projectId, undefined, forceTopology).catch(() => coordinator.list(projectId)).catch(() => []);
+      for (const task of tasks.filter(linearLifecycleNeedsQueuedLaunchPrompt)) {
+        await queueLinearLifecycle(task, "followUp");
+        await coordinator.updateLinearLifecycle(task.projectId, task.id, (current) => ({
+          ...current,
+          queuedLaunchPromptedAt: current.queuedLaunchPromptedAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }));
+      }
       const active = tasks.filter((task) => !["completed", "failed", "stopped", "merged"].includes(task.status));
       const pendingCount = pendingLeadEvents(tasks).length;
       dashboardContext.ui.setStatus(STATUS_KEY, leadStatusSummary(tasks, pendingCount));
@@ -261,7 +282,7 @@ export default function leadExtension(pi: ExtensionAPI) {
         if (claimed) {
           const { task, event } = claimed;
           dashboardContext.ui.notify(
-            `${task.brief.title}: ${event.status}${event.blockedReason ? ` — ${event.blockedReason}` : ""}`,
+            `${task.brief.title}: ${event.kind === "runtime" ? event.runtimeState ?? task.runtime?.state ?? "runtime attention" : event.status}${event.blockedReason ? ` — ${event.blockedReason}` : event.kind === "runtime" && (event.runtimeReason ?? event.summary) ? ` — ${event.runtimeReason ?? event.summary}` : ""}`,
             event.status === "blocked" || event.status === "failed" ? "warning" : "info",
           );
           pi.sendMessage({
@@ -332,6 +353,10 @@ export default function leadExtension(pi: ExtensionAPI) {
         ctx.ui.setStatus(STATUS_KEY, `${task.role} · ${task.status}`);
         ctx.ui.setWidget(WIDGET_KEY, [taskLine(task), `Lead task ${task.id.slice(0, 8)}`], { placement: "aboveEditor" });
         inboxContext = ctx;
+        runtimeController = new WorkerRuntimeController(store, workerProjectId, workerTaskId, (message) => {
+          pi.sendMessage({ customType: "lead:runtime-follow-up", content: message, display: true }, { deliverAs: "followUp", triggerTurn: true });
+        });
+        await runtimeController.start(ctx);
         inboxTimer = setInterval(() => void drainInbox(), 1_000);
         inboxTimer.unref();
         void drainInbox();
@@ -353,7 +378,7 @@ export default function leadExtension(pi: ExtensionAPI) {
     ctx.ui.setTitle(`Lead · ${context.git.name}`);
     dashboardProjectId = context.record.projectId;
     dashboardContext = ctx;
-    await updateDashboard(false);
+    await updateDashboard(false, true);
     leadWakeTimer = setTimeout(() => void updateDashboard(true), 250);
     leadWakeTimer.unref();
     linearWakeTimer = setTimeout(() => void resumePendingLinearLifecycle(), 500);
@@ -364,7 +389,21 @@ export default function leadExtension(pi: ExtensionAPI) {
     ciTimer.unref();
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("agent_start", async (_event, ctx) => {
+    if (isWorker) await runtimeController?.agentStart(ctx);
+  });
+
+  pi.on("turn_end", async (_event, ctx) => {
+    if (isWorker) await runtimeController?.activity(ctx);
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (isWorker) await runtimeController?.settled(ctx);
+  });
+
+  pi.on("session_shutdown", async (event) => {
+    await runtimeController?.shutdown(event.reason);
+    runtimeController = undefined;
     if (dashboardTimer) clearInterval(dashboardTimer);
     if (leadWakeTimer) clearTimeout(leadWakeTimer);
     if (linearWakeTimer) clearTimeout(linearWakeTimer);
@@ -425,6 +464,7 @@ export default function leadExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    if (isWorker) await runtimeController?.activity(ctx);
     if (isDestructiveLinearTool(event.toolName)) {
       return { block: true, reason: "Destructive Linear operations and workspace switching are outside the Lead workflow boundary." };
     }
@@ -494,7 +534,8 @@ export default function leadExtension(pi: ExtensionAPI) {
         acceptanceCriteria: Type.Optional(Type.Array(Type.String(), { maxItems: 50 })),
         baseBranch: Type.Optional(Type.String()),
         parentTaskId: Type.Optional(Type.String({ description: "Required for review workers; implementation task ID or unique prefix." })),
-        model: Type.Optional(Type.String({ description: "Optional Pi model pattern for this worker. Defaults to the Lead model." })),
+        model: Type.Optional(Type.String({ description: "Optional explicit provider/model for this worker. Overrides trusted project policy and the Lead model." })),
+        thinking: Type.Optional(ThinkingSchema),
       }),
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         let task = await coordinator.delegate(params, {
@@ -515,7 +556,9 @@ export default function leadExtension(pi: ExtensionAPI) {
         }
         await updateDashboard(false);
         return textResult(
-          `Visible ${task.role} worker ${task.id.slice(0, 8)} is running in ${task.surface?.surfaceId}. The operator can inspect or type in that Pi session directly.${linearNote}`,
+          task.launchState === "queued"
+            ? `${task.role} worker ${task.id.slice(0, 8)} is durably queued because the visible surface cap is full. It launches automatically when capacity opens.${linearNote}`
+            : `Visible ${task.role} worker ${task.id.slice(0, 8)} is running in ${task.surface?.surfaceId}. The operator can inspect or type in that Pi session directly.${linearNote}`,
           { task },
         );
       },
@@ -619,6 +662,7 @@ export default function leadExtension(pi: ExtensionAPI) {
         const task = await coordinator.report(workerProjectId, workerTaskId, params, signal);
         ctx.ui.setStatus(STATUS_KEY, `${task.role} · ${task.status}`);
         ctx.ui.setWidget(WIDGET_KEY, [taskLine(task), `Lead task ${task.id.slice(0, 8)}`], { placement: "aboveEditor" });
+        if (isTerminalTaskStatus(task.status)) ctx.shutdown();
         if (params.rebindReviewTarget && task.reviewTarget) {
           const packetPath = join(store.taskArtifactDirectory(workerProjectId, workerTaskId), "review-packet.md");
           return textResult(
@@ -632,7 +676,7 @@ export default function leadExtension(pi: ExtensionAPI) {
   }
 
   pi.registerCommand("workers", {
-    description: "Triage visible Lead workers: inspect status, blocked reasons, message, stop, or dismiss",
+    description: "Triage worker runtime, handoff, focus, graceful shutdown, retirement, resume, and durable events",
     handler: async (_args, ctx) => {
       const projectId = workerProjectId ?? (await coordinator.project({ cwd: ctx.cwd }).catch(() => undefined))?.record.projectId;
       if (!projectId) {
@@ -668,16 +712,48 @@ export default function leadExtension(pi: ExtensionAPI) {
           }
           continue;
         }
+        if (action === TRIAGE_ACTION_HANDOFF) {
+          await coordinator.message(projectId, task.id, "Operator requested a durable handoff. Call lead_worker_report with current status, concrete progress, blockers, and exact continuation steps; do not invent completion.");
+          ctx.ui.notify(`Handoff request queued for ${task.id.slice(0, 8)}; durable state is unchanged`, "info");
+          continue;
+        }
+        if (action === TRIAGE_ACTION_FOCUS) {
+          await coordinator.focus(projectId, task.id);
+          ctx.ui.notify(`Focused ${task.surface?.surfaceId}; durable state, session, and worktree are unchanged`, "info");
+          continue;
+        }
         if (action === TRIAGE_ACTION_STOP) {
           const confirmed = await ctx.ui.confirm(
-            `Mark ${task.id.slice(0, 8)} stopped?`,
-            `${task.brief.title}\n\nThis reconciles durable state only; it does not kill the process or delete the worktree.`,
+            `Gracefully stop ${task.id.slice(0, 8)}?`,
+            `${task.brief.title}\n\nPersists stopped state and asks the Pi process to shut down when idle. The cmux surface, session file, and worktree remain.`,
           );
           if (confirmed) {
-            await coordinator.report(projectId, task.id, { status: "stopped", summary: "Marked stopped from the /workers triage picker" });
-            ctx.ui.notify(`${task.id.slice(0, 8)}: stopped`, "info");
+            await coordinator.requestStop(projectId, task.id);
+            ctx.ui.notify(`${task.id.slice(0, 8)}: graceful shutdown requested`, "info");
             await updateDashboard(false);
           }
+          continue;
+        }
+        if (action === TRIAGE_ACTION_RETIRE) {
+          const confirmed = await ctx.ui.confirm(
+            `Retire ${task.surface?.surfaceId}?`,
+            "Closes only this exact owned cmux surface. The durable task, Pi session file, and worktree remain resumable.",
+          );
+          if (confirmed) await coordinator.retire(projectId, task.id, true);
+          await updateDashboard(false);
+          continue;
+        }
+        if (action === TRIAGE_ACTION_RESUME) {
+          const resumed = await coordinator.resume(projectId, task.id);
+          ctx.ui.notify(resumed.launchState === "queued" ? "Resume queued until surface capacity opens" : `Resumed in ${resumed.surface?.surfaceId}`, "info");
+          await updateDashboard(false);
+          continue;
+        }
+        if (action === TRIAGE_ACTION_CLOSE_ELIGIBLE) {
+          const project = await store.readProject(projectId);
+          const closed = project ? await coordinator.reclaimEligible(project) : 0;
+          ctx.ui.notify(`Closed ${closed} eligible surface${closed === 1 ? "" : "s"}; session files and worktrees were retained`, "info");
+          await updateDashboard(false);
           continue;
         }
         if (action === TRIAGE_ACTION_DISMISS) {
@@ -721,6 +797,7 @@ export default function leadExtension(pi: ExtensionAPI) {
         if (!context) return;
         const cmux = await execute("cmux", ["identify", "--json"], { cwd: context.git.root, timeout: 15_000 });
         const version = await execute("pi", ["--version"], { cwd: context.git.root, timeout: 15_000 });
+        const workerPolicy = effectiveWorkerPolicy(context.record.workers);
         const lines = [
           `Git: ${context.git.root} (base ${context.git.defaultBaseBranch})`,
           `Pi: ${version.code === 0 ? version.stdout.trim() : "not available in PATH"}`,
@@ -729,6 +806,8 @@ export default function leadExtension(pi: ExtensionAPI) {
           `Caller surface: ${process.env.CMUX_SURFACE_ID || "missing"}`,
           `Worker extension: ${extensionPath || "package discovery"}`,
           `Auto-review chain: ${context.record.autoReview === false ? "off (project opt-out)" : "on"}`,
+          `Worker surfaces: max ${workerPolicy.maxVisibleSurfaces}, retain terminal ${workerPolicy.terminalSurfaceRetentionMinutes}m`,
+          `Worker runtime: heartbeat ${workerPolicy.heartbeatSeconds}s, stale ${workerPolicy.staleAfterSeconds}s, topology ${workerPolicy.supervisionSeconds}s, context ${workerPolicy.contextWarnPercent}%/${workerPolicy.contextHandoffPercent}%`,
           `State: ${store.root}`,
         ];
         ctx.ui.notify(lines.join("\n"), cmux.code === 0 && version.code === 0 ? "info" : "warning");

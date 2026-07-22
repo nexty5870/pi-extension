@@ -21,6 +21,65 @@ export const LEAD_EVENT_STATUSES = [
   "merged",
 ] as const satisfies readonly TaskStatus[];
 export type WorkerRole = "implementation" | "review" | "research";
+export type WorkerRuntimeState = "starting" | "busy" | "idle" | "stale" | "offline" | "detached" | "needs-attention";
+export type WorkerSurfaceHealth = "healthy" | "missing" | "detached";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface WorkerRuntime {
+  state: WorkerRuntimeState;
+  lastHeartbeatAt?: string;
+  lastActivityAt?: string;
+  lastReportAt?: string;
+  lastAgentSettledAt?: string;
+  contextTokens?: number;
+  contextWindow?: number;
+  contextPercent?: number;
+  loadedRuntimeVersion?: string;
+  surfaceHealth?: WorkerSurfaceHealth;
+  attentionReason?: string;
+  shutdownReason?: string;
+  shutdownRequestedAt?: string;
+  terminalAt?: string;
+  reportNudgeState?: "scheduled" | "sent" | "attention";
+  reportNudgeAt?: string;
+  reportBaselineAt?: string;
+  contextWarnedAt?: string;
+  contextHandoffRequestedAt?: string;
+  retiredAt?: string;
+  retiredSurfaceId?: string;
+  surfaceTransitionKey?: string;
+  telemetryError?: string;
+}
+
+export interface WorkerSelection {
+  model?: string;
+  thinking?: ThinkingLevel;
+}
+
+export interface WorkerModelRule extends WorkerSelection {
+  pattern: string;
+}
+
+export interface WorkerPolicy {
+  maxVisibleSurfaces?: number;
+  heartbeatSeconds?: number;
+  staleAfterSeconds?: number;
+  idleReportGraceSeconds?: number;
+  terminalSurfaceRetentionMinutes?: number;
+  contextWarnPercent?: number;
+  contextHandoffPercent?: number;
+  supervisionSeconds?: number;
+  default?: WorkerSelection & { inheritModel?: boolean };
+  roles?: Partial<Record<WorkerRole, WorkerSelection>>;
+  models?: WorkerModelRule[];
+}
+
+export interface ResolvedWorkerPolicy {
+  model?: string;
+  provider?: string;
+  modelId?: string;
+  thinking?: ThinkingLevel;
+}
 
 export interface TaskBrief {
   title: string;
@@ -90,7 +149,7 @@ export interface WorkerMessage {
 
 export interface LeadTaskEvent {
   id: string;
-  kind: "status" | "review";
+  kind: "status" | "review" | "runtime";
   status: TaskStatus;
   createdAt: string;
   observedAt?: string;
@@ -101,6 +160,9 @@ export interface LeadTaskEvent {
   handoff?: string;
   review?: ReviewEvidence;
   pullRequestUrl?: string;
+  runtimeReasonKey?: string;
+  runtimeState?: WorkerRuntimeState;
+  runtimeReason?: string;
   linear?: {
     issueIdentifier: string;
     status: LinearLifecycleState["status"];
@@ -130,6 +192,7 @@ export interface LinearLifecycleState {
   promptCount?: number;
   promptClaimId?: string;
   promptClaimedAt?: string;
+  queuedLaunchPromptedAt?: string;
   lastError?: string;
   updatedAt: string;
 }
@@ -166,6 +229,11 @@ export interface TaskRecord {
   leadObservedAt?: string;
   failure?: string;
   setupWarnings?: string[];
+  runtime?: WorkerRuntime;
+  resolvedWorker?: ResolvedWorkerPolicy;
+  launchState?: "queued" | "launching" | "launched" | "retired";
+  launchClaimId?: string;
+  launchClaimedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -177,6 +245,8 @@ export interface ProjectRecord {
   projectName: string;
   leadSessionFile?: string;
   autoReview?: boolean;
+  workers?: WorkerPolicy;
+  surfaceLaunchClaims?: Record<string, string>;
   cmux?: {
     workspaceId: string;
     callerSurfaceId: string;
