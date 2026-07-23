@@ -68,6 +68,46 @@ function featureInput(lead: LeadAttachment, operation: string, index: number) {
   };
 }
 
+async function runningWorkerFixture(processIncarnation: string) {
+  const context = await fixture();
+  const { core, leads } = context;
+  const feature = await core.createFeature(featureInput(leads[0], `worker-${processIncarnation}`, 402));
+  const worker = await core.createTask({
+    attachmentId: leads[0].id,
+    ownershipToken: leads[0].ownershipToken,
+    clientOperationId: `worker-${processIncarnation}-task`,
+    featureId: feature.id,
+    role: "research",
+    title: "Crash after hello",
+    task: "Exercise worker process fencing",
+  });
+  assert.deepEqual((await core.tick()).workers.map((candidate) => candidate.id), [worker.id]);
+  const agents = identity(81);
+  await core.recordAgentsWorkspace({
+    ownershipToken: "agents-crash-token",
+    sessionGeneration: 1,
+    windowUuid: agents.windowUuid,
+    workspaceUuid: agents.workspaceUuid,
+    paneUuid: agents.paneUuid,
+    createdAt: new Date().toISOString(),
+  });
+  const workerIdentity = identity(82);
+  await core.recordWorkerSurface(worker.id, workerIdentity);
+  const running = await core.workerHello({
+    taskId: worker.id,
+    ownershipToken: worker.runtime.ownershipToken,
+    sessionGeneration: worker.runtime.sessionGeneration,
+    sessionId: worker.sessionId,
+    processIncarnation,
+    pid: 999_999_998,
+    cmux: workerIdentity,
+    actualModel: worker.resolved.requestedModel,
+    actualThinking: worker.resolved.requestedThinking,
+  });
+  assert.equal(running.processState, "running");
+  return { ...context, worker: running };
+}
+
 test("V2 import is a one-time read-only hashed snapshot and never resume-authorized", async () => {
   const root = await mkdtemp(join(tmpdir(), "lead-v4-legacy-"));
   const projectRoot = join(root, "repo");
@@ -572,61 +612,75 @@ test("an unattached live Lead is fenced and terminated on timeout so capacity is
   assert.deepEqual((await core.tick()).leads.map((candidate) => candidate.id), [next.id]);
 });
 
-test("worker exit and runtime reconciliation preserve a fenced crash outcome", async () => {
-  const { core, store, leads, root } = await fixture();
-  const feature = await core.createFeature(featureInput(leads[0], "worker-crash", 402));
-  const worker = await core.createTask({
-    attachmentId: leads[0].id,
-    ownershipToken: leads[0].ownershipToken,
-    clientOperationId: "worker-crash-task",
-    featureId: feature.id,
-    role: "research",
-    title: "Crash after hello",
-    task: "Exercise exit reconciliation",
-  });
-  await core.tick();
-  const agents = identity(81);
-  await core.recordAgentsWorkspace({
-    ownershipToken: "agents-crash-token",
-    sessionGeneration: 1,
-    windowUuid: agents.windowUuid,
-    workspaceUuid: agents.workspaceUuid,
-    paneUuid: agents.paneUuid,
-    createdAt: new Date().toISOString(),
-  });
-  const workerIdentity = identity(82);
-  await core.recordWorkerSurface(worker.id, workerIdentity);
-  await core.workerHello({
-    taskId: worker.id,
-    ownershipToken: worker.runtime.ownershipToken,
-    sessionGeneration: worker.runtime.sessionGeneration,
-    sessionId: worker.sessionId,
-    processIncarnation: "crashed-process",
-    pid: 999_999_998,
-    cmux: workerIdentity,
-    actualModel: worker.resolved.requestedModel,
-    actualThinking: worker.resolved.requestedThinking,
-  });
-  await core.workerExited({
-    taskId: worker.id,
-    ownershipToken: worker.runtime.ownershipToken,
-    sessionGeneration: worker.runtime.sessionGeneration,
-    processIncarnation: "crashed-process",
-  });
+test("runtime reconciliation marks a genuinely running unattested worker UNKNOWN", async () => {
+  const { core, store, root, worker } = await runningWorkerFixture("missing-process");
+  await store.update((state) => ({
+    ...state,
+    tasks: {
+      ...state.tasks,
+      [worker.id]: {
+        ...state.tasks[worker.id],
+        runtime: { ...state.tasks[worker.id].runtime, lastHeartbeatAt: "2999-01-01T00:00:00.000Z" },
+      },
+    },
+  }));
+  const before = await store.read();
+  assert.equal(before.tasks[worker.id].processState, "running");
+
   const adapter = new V4RuntimeAdapter(join(root, "artifacts"));
   adapter.topology = async () => ({
     complete: true,
-    capturedAt: new Date().toISOString(),
+    capturedAt: "2026-01-01T00:02:00.000Z",
     workspaceUuids: new Set(),
     workspaceToWindow: new Map(),
     paneToWorkspace: new Map(),
     surfaceToPane: new Map(),
     processPidsBySurface: new Map(),
   });
-  await adapter.reconcile(await store.read(), core);
-  const crashed = (await core.status()).tasks.find((candidate) => candidate.id === worker.id)!;
-  assert.equal(crashed.processState, "offline");
-  assert.ok(crashed.runtime.terminalAt);
+  await adapter.reconcile(before, core);
+
+  const durable = await store.read();
+  const reconciled = durable.tasks[worker.id];
+  const reason = "topology=absent, processAttested=false, heartbeatFresh=true";
+  assert.equal(reconciled.processState, "unknown");
+  assert.equal(reconciled.runtime.crashReason, reason);
+  assert.deepEqual(durable.events
+    .filter((event) => event.taskId === worker.id && event.kind === "runtime")
+    .map((event) => ({ actionable: event.actionable, summary: event.summary })), [{
+    actionable: true,
+    summary: `Launch outcome UNKNOWN: ${reason}. Duplicate launch, resume, reuse, and cleanup are forbidden.`,
+  }]);
+});
+
+test("worker exit is process/generation-fenced before taking the current worker offline", async () => {
+  const { core, worker } = await runningWorkerFixture("newer-process");
+  await assert.rejects(() => core.workerExited({
+    taskId: worker.id,
+    ownershipToken: worker.runtime.ownershipToken,
+    sessionGeneration: worker.runtime.sessionGeneration,
+    processIncarnation: "older-process",
+  }), /process-incarnation fencing/);
+  await assert.rejects(() => core.workerExited({
+    taskId: worker.id,
+    ownershipToken: worker.runtime.ownershipToken,
+    sessionGeneration: worker.runtime.sessionGeneration + 1,
+    processIncarnation: "newer-process",
+  }), /process-incarnation fencing/);
+  const stillRunning = (await core.status()).tasks.find((candidate) => candidate.id === worker.id)!;
+  assert.equal(stillRunning.processState, "running");
+  assert.equal(stillRunning.runtime.processIncarnation, "newer-process");
+  assert.equal(stillRunning.runtime.terminalAt, undefined);
+
+  await core.workerExited({
+    taskId: worker.id,
+    ownershipToken: worker.runtime.ownershipToken,
+    sessionGeneration: worker.runtime.sessionGeneration,
+    processIncarnation: "newer-process",
+  });
+  const exited = (await core.status()).tasks.find((candidate) => candidate.id === worker.id)!;
+  assert.equal(exited.processState, "offline");
+  assert.equal(exited.runtime.processIncarnation, "newer-process");
+  assert.ok(exited.runtime.terminalAt);
 });
 
 test("all pending owned events form one bounded concurrent at-least-once digest and survive owner death at claim/ack", async () => {
