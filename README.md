@@ -6,7 +6,33 @@ The repository is intentionally public-safe: it does not contain credentials, se
 
 ## Included extensions
 
-### Lead + visible workers (V2)
+### V4 multi-Lead durable supervisor (opt-in)
+
+V4 moves supervision out of interactive Pi sessions into one detached, private local supervisor. Multiple Lead sessions can attach to the same project, own independent feature tracks, fail over after fenced lease expiry, and schedule workers fairly into a dedicated non-focused `Agents · <project>` cmux workspace.
+
+Enable it for a fresh Lead process:
+
+```bash
+PI_LEAD_V4=1 pi
+```
+
+V4 and V2 are mutually exclusive inside an extension instance: the opt-in returns before any V2 timer, event claim, launch, reconciliation, or retirement path starts. Normal work uses plain-language-capable internal tools for feature creation, non-focused Lead spawning, worker/model selection, status, inspection, stop, and rollback checks. `/workers` is diagnostics compatibility only.
+
+Highlights:
+
+- one per-user detached Node supervisor behind a private, versioned AF_UNIX protocol and fencing epoch;
+- at least three concurrent attachable Leads with persisted feature ownership and failover;
+- canonical issue/task idempotency and explicit choices for ambiguous natural-language duplicates;
+- separate `maxConcurrentLeads` and fair `maxConcurrentWorkerProcesses` limits;
+- stable cmux UUID identity plus generation/token/session/process attestation—short refs and `in_window` are never liveness;
+- explicit model/thinking precedence (operator > spawning Lead > feature > role/project > inherited), requested-versus-actual persistence, and visible no-fallback failures;
+- one bounded owning-Lead digest for all pending events, retained while no Lead is attached; routine telemetry stays native and does not force a turn;
+- no Lead shutdown/cleanup target and automatic worker-surface retirement off by default;
+- read-only hashed V2 snapshots that are never resumed without fresh V4 attestation.
+
+The production supervisor is checked in at `extensions/lead-v4/runtime/supervisor.mjs`; regenerate it with `npm run build:v4-supervisor`. See [`docs/lead-worker-v4.md`](docs/lead-worker-v4.md) for architecture, multi-Lead flow, models, recovery, safety, caveats, and rollback.
+
+### Lead + visible workers (V2, default compatibility path)
 
 One persistent **Lead** Pi session coordinates real, interactive Pi workers in the caller's cmux workspace. V2 removes mandatory contracts, approval phrases, hidden worker subprocesses, and global edit/tool lockouts.
 
@@ -80,7 +106,7 @@ Failed updates leave the existing TUI running and display the update output.
 
 - Pi.dev coding agent
 - Node.js 22.15 or newer (`process.execve()` support for `/update`)
-- Git and cmux with `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` in the Lead terminal
+- Git and cmux with stable caller UUIDs available through `cmux identify --json` (`CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` in the terminal)
 - GitHub CLI (`gh`) for PR status observation and publication by workers
 - An installation that Pi can update with `pi update --self`
 
@@ -145,7 +171,7 @@ printf '{"id":"commands","type":"get_commands"}\n' |
   pi --mode rpc --no-session -e ./extensions/lead/index.ts
 ```
 
-Run `npm test`, `npm run typecheck`, and `git diff --check` before publishing. The `/update` command refuses execution outside interactive TUI mode.
+Run `npm run build:v4-supervisor`, `npm test`, `npm run typecheck`, and `git diff --check` before publishing. The `/update` command refuses execution outside interactive TUI mode.
 
 ## Journey
 

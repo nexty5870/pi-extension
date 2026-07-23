@@ -980,7 +980,9 @@ export class LeadCoordinator {
       lastReportAt: reportedAt,
       reportNudgeState: undefined,
       reportNudgeAt: undefined,
-      reportBaselineAt: reportedAt,
+      // V2.1 hotfix: agentStart owns reportBaselineAt. Overwriting it with
+      // lastReportAt here makes a valid running/blocked report look reportless
+      // at settle and causes a durable reminder loop.
       terminalAt: isTerminalTaskStatus(task.status) ? runtime.terminalAt ?? reportedAt : runtime.terminalAt,
       shutdownRequestedAt: isTerminalTaskStatus(task.status) ? runtime.shutdownRequestedAt ?? reportedAt : runtime.shutdownRequestedAt,
       shutdownReason: isTerminalTaskStatus(task.status) ? `Terminal ${task.status} report persisted` : runtime.shutdownReason,
