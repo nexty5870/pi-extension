@@ -1,20 +1,28 @@
 # V4 multi-Lead durable supervisor
 
-V4 is an opt-in compatibility path. It moves process supervision, feature ownership, scheduling, launch reconciliation, and event retention out of interactive Pi sessions into one detached local supervisor. Pi Lead sessions become thin, attachable clients.
+V4 is the default Lead workflow. It moves process supervision, feature ownership, scheduling, launch reconciliation, and event retention out of interactive Pi sessions into one detached local supervisor. Pi Lead sessions become thin, attachable clients.
 
-V2 remains the default. V4 does not run V2 timers, event claims, launches, topology reconciliation, or retirement in the same extension instance.
+A fresh ordinary `pi` process selects V4 before any V2 timer, event claim, launch, topology reconciliation, or retirement path initializes.
 
-## Enable and roll back
+## Start and roll back
 
 Start a Lead in a trusted Git checkout inside cmux:
 
 ```bash
-PI_LEAD_V4=1 pi
+pi
 ```
 
-A Lead started by V4 and every V4 worker inherit the V4 environment automatically. Do not enable V4 and V2 mutation paths against the same project at once.
+`PI_LEAD_V4=1 pi` remains accepted for compatibility. A Lead started by V4 and every V4 worker export `PI_LEAD_V4=1` automatically, so their workflow remains explicitly fenced.
 
-Before rolling back, ask the Lead to check V4 rollback safety. The internal `lead_v4_rollback_check` tool refuses while a worker generation is launching, live, `unknown`, or quarantined. When it reports safe, close/detach V4 Leads and start a fresh Pi process without `PI_LEAD_V4`. Rollback does not delete state, worktrees, sessions, or retained surfaces.
+V2 remains available as an explicit compatibility and rollback path:
+
+```bash
+PI_LEAD_V4=0 pi
+```
+
+Before rolling back, ask the V4 Lead to run the internal `lead_v4_rollback_check` tool. It refuses while a worker generation is launching, live, `unknown`, or quarantined. Only after it reports safe, close/detach **every** V4 Lead for the project and start a **fresh** process with `PI_LEAD_V4=0 pi`. Do not reuse or reload a V4 Lead as the rollback process. Never run V2 and V4 mutation paths concurrently for the same project. Rollback does not delete state, worktrees, sessions, or retained surfaces.
+
+New V2 launch scripts export `PI_LEAD_V4=0`. For upgrade safety, a legacy or resumed V2 worker carrying both durable `PI_LEAD_TASK_ID` and `PI_LEAD_PROJECT_ID` stays on V2 even if its older launch script has no selector.
 
 ## Architecture
 

@@ -6,17 +6,17 @@ The repository is intentionally public-safe: it does not contain credentials, se
 
 ## Included extensions
 
-### V4 multi-Lead durable supervisor (opt-in)
+### V4 multi-Lead durable supervisor (default)
 
 V4 moves supervision out of interactive Pi sessions into one detached, private local supervisor. Multiple Lead sessions can attach to the same project, own independent feature tracks, fail over after fenced lease expiry, and schedule workers fairly into a dedicated non-focused `Agents · <project>` cmux workspace.
 
-Enable it for a fresh Lead process:
+Start a fresh Lead normally:
 
 ```bash
-PI_LEAD_V4=1 pi
+pi
 ```
 
-V4 and V2 are mutually exclusive inside an extension instance: the opt-in returns before any V2 timer, event claim, launch, reconciliation, or retirement path starts. Normal work uses plain-language-capable internal tools for feature creation, non-focused Lead spawning, worker/model selection, status, inspection, stop, and rollback checks. `/workers` is diagnostics compatibility only.
+`PI_LEAD_V4=1 pi` remains accepted for compatibility, and V4-spawned Leads and workers export that selector explicitly. V4 and V2 are mutually exclusive inside an extension instance: default selection returns into V4 before any V2 timer, event claim, launch, reconciliation, or retirement path starts. Normal work uses plain-language-capable internal tools for feature creation, non-focused Lead spawning, worker/model selection, status, inspection, stop, and rollback checks. `/workers` is diagnostics compatibility only.
 
 Highlights:
 
@@ -32,7 +32,15 @@ Highlights:
 
 The production supervisor is checked in at `extensions/lead-v4/runtime/supervisor.mjs`; regenerate it with `npm run build:v4-supervisor`. See [`docs/lead-worker-v4.md`](docs/lead-worker-v4.md) for architecture, multi-Lead flow, models, recovery, safety, caveats, and rollback.
 
-### Lead + visible workers (V2, default compatibility path)
+### Lead + visible workers (V2 explicit compatibility/rollback path)
+
+Start a fresh V2 process only with the explicit selector:
+
+```bash
+PI_LEAD_V4=0 pi
+```
+
+New V2 launch scripts propagate `PI_LEAD_V4=0`; legacy or resumed V2 workers carrying both `PI_LEAD_TASK_ID` and `PI_LEAD_PROJECT_ID` also remain on V2 when no selector is present. Before rolling a project back from V4, run `lead_v4_rollback_check`, close/detach every V4 Lead, and then start a **fresh** process with `PI_LEAD_V4=0 pi`. Never run V2 and V4 mutation paths concurrently for the same project.
 
 One persistent **Lead** Pi session coordinates real, interactive Pi workers in the caller's cmux workspace. V2 removes mandatory contracts, approval phrases, hidden worker subprocesses, and global edit/tool lockouts.
 
