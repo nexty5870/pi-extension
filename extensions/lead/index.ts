@@ -51,6 +51,7 @@ import {
   triageDetail,
 } from "./triage.ts";
 import { isTerminalTaskStatus, type TaskRecord, type WorkerRole } from "./types.ts";
+import { selectLeadWorkflow } from "./workflow.ts";
 import leadV4Extension from "../lead-v4/client-extension.ts";
 
 declare const __filename: string;
@@ -123,11 +124,10 @@ function resultText(content: unknown): string {
 }
 
 export default function leadExtension(pi: ExtensionAPI) {
-  // V4 is an explicit compatibility boundary. When enabled, return before any
-  // V2 timer, reconciliation, event claim, launch, or retirement path exists in
-  // this extension instance. Rollback is simply unsetting PI_LEAD_V4 after the
-  // supervisor's rollbackCheck reports no active/uncertain generations.
-  if (process.env.PI_LEAD_V4 === "1") return leadV4Extension(pi);
+  // Select the workflow before any V2 identity, store, timer, reconciliation,
+  // event claim, launch, or retirement path is initialized. V4 is the default;
+  // PI_LEAD_V4=0 and selector-less durable V2 workers stay on V2.
+  if (selectLeadWorkflow(process.env) === "v4") return leadV4Extension(pi);
 
   const workerTaskId = process.env.PI_LEAD_TASK_ID;
   const workerProjectId = process.env.PI_LEAD_PROJECT_ID;

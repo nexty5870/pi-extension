@@ -1,13 +1,13 @@
 ---
 name: lead-orchestration
-description: Coordinate durable multi-Lead feature tracks and visible Pi workers in cmux, with V2 compatibility when V4 is not enabled.
+description: Coordinate default V4 durable multi-Lead feature tracks and visible Pi workers in cmux, with explicit V2 rollback compatibility.
 ---
 
 # Lead orchestration
 
-## V4 opt-in
+## V4 default
 
-When `PI_LEAD_V4=1`, this Pi session is a thin client attached to a durable local supervisor. The supervisor—not the interactive Lead—owns feature state, worker scheduling, launch reconciliation, and retained events. Lead death must not stop or duplicate workers.
+A fresh ordinary `pi` session uses V4 and becomes a thin client attached to a durable local supervisor. `PI_LEAD_V4=1` remains accepted and is exported by V4-spawned Leads and workers. The supervisor—not the interactive Lead—owns feature state, worker scheduling, launch reconciliation, and retained events. Lead death must not stop or duplicate workers.
 
 Use normal conversation and internal tools; no slash command is required:
 
@@ -37,9 +37,11 @@ Events are at-least-once. One bounded digest claims all pending owned events; it
 
 Never target Lead attachments for shutdown or cleanup. Automatic worker-surface retirement is off by default. Merge, deployment, production mutation, force-push, credentials, destructive Linear actions, and unrelated external changes require their existing separate boundaries.
 
-## V2 default compatibility
+## V2 explicit compatibility/rollback
 
-Without `PI_LEAD_V4=1`, use the V2 tools:
+Use V2 only from a fresh `PI_LEAD_V4=0 pi` process. Before rollback, run `lead_v4_rollback_check`, detach every V4 Lead, and never run V2 and V4 mutation paths concurrently for one project. Legacy/resumed workers with durable `PI_LEAD_TASK_ID` plus `PI_LEAD_PROJECT_ID` remain V2 even without the selector.
+
+In V2, use these tools:
 
 - `lead_delegate` for visible implementation/research/review workers;
 - `lead_workers`, `lead_message_worker`, `lead_update_worker`, and `lead_refresh_pr` for reconciliation;

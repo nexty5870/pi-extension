@@ -60,6 +60,7 @@ export function renderLaunchScript(input: {
     "#!/bin/sh",
     "set -eu",
     `cd ${shellQuote(task.worktreePath)}`,
+    exportLine("PI_LEAD_V4", "0"),
     exportLine("PI_LEAD_TASK_ID", task.id),
     exportLine("PI_LEAD_PROJECT_ID", task.projectId),
     exportLine("PI_LEAD_STATE_DIR", input.stateDir),

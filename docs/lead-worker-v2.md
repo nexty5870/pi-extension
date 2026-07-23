@@ -1,6 +1,8 @@
 # Lead + visible workers V2
 
-> **Default compatibility path:** V2 remains available unchanged by default. The opt-in durable multi-Lead architecture is documented in [V4 multi-Lead durable supervisor](lead-worker-v4.md). A V4 extension instance returns before any V2 timer or mutation path starts.
+> **Explicit compatibility/rollback path:** V4 is the default for a fresh ordinary `pi` process. Start V2 only with `PI_LEAD_V4=0 pi`. The default durable multi-Lead architecture is documented in [V4 multi-Lead durable supervisor](lead-worker-v4.md).
+
+Before rolling a project back from V4, run `lead_v4_rollback_check`, close/detach every V4 Lead, and then start a **fresh** process with `PI_LEAD_V4=0 pi`. Never run V2 and V4 mutation paths concurrently for one project. New V2 launch scripts propagate `PI_LEAD_V4=0`; legacy or resumed V2 workers carrying both `PI_LEAD_TASK_ID` and `PI_LEAD_PROJECT_ID` remain V2 even when an older launch script has no selector.
 
 ## Purpose
 
@@ -166,7 +168,11 @@ Install the checkout as a local package once:
 pi install /absolute/path/to/pi-harness
 ```
 
-Then, in a Git repository opened inside cmux:
+Then start a fresh explicit V2 process in a Git repository opened inside cmux:
+
+```bash
+PI_LEAD_V4=0 pi
+```
 
 1. Run `/reload`.
 2. Run `/lead-doctor`; Git, Pi, cmux, caller workspace, and caller surface should all be ready.

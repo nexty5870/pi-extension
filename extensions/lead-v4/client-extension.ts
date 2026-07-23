@@ -639,7 +639,7 @@ export default function leadV4Extension(pi: ExtensionAPI) {
       parameters: Type.Object({}),
       async execute() {
         const result = await rpc<{ safe: true }>("rollbackCheck");
-        return textResult("V4 is quiescent; after all Lead clients detach, a fresh Pi process may be started without PI_LEAD_V4 to use V2.", result);
+        return textResult("V4 is quiescent; after every V4 Lead for this project detaches, start a fresh PI_LEAD_V4=0 pi process for V2. Never run V2 and V4 mutation paths concurrently for one project.", result);
       },
     });
 
