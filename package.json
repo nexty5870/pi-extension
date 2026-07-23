@@ -12,6 +12,7 @@
     "node": ">=22.15.0"
   },
   "scripts": {
+    "build:v4-supervisor": "esbuild extensions/lead-v4/supervisor-main.ts --bundle --platform=node --format=esm --target=node22 --outfile=extensions/lead-v4/runtime/supervisor.mjs --external:@earendil-works/* --external:typebox",
     "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -37,6 +38,7 @@
     "@earendil-works/pi-ai": "0.80.7",
     "@earendil-works/pi-tui": "0.80.7",
     "@types/node": "22.19.1",
+    "esbuild": "^0.25.12",
     "tsx": "4.20.6",
     "typebox": "1.3.6",
     "typescript": "5.9.3"

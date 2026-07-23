@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { LeadCoordinator } from "../extensions/lead/coordinator.ts";
 import { effectiveWorkerPolicy, resolveWorkerPolicy } from "../extensions/lead/policy.ts";
 import { WorkerRuntimeController } from "../extensions/lead/runtime.ts";
 import { LeadStore } from "../extensions/lead/store.ts";
@@ -74,6 +75,26 @@ test("worker lifecycle is deterministic and reportless settling nudges once then
   assert.equal(attention.runtime?.state, "needs-attention");
   assert.equal(attention.leadEvents?.filter((event) => event.kind === "runtime").length, 1);
   assert.match(attention.runtime?.attentionReason ?? "", /settled again/);
+  await runtime.shutdown("reload");
+});
+
+test("coordinator running/blocked reports preserve agent-start baseline and produce zero reminder turns", async () => {
+  const { store, project, task } = await fixture({ idleReportGraceSeconds: 0 });
+  const sent: string[] = [];
+  const fake = context();
+  const runtime = new WorkerRuntimeController(store, project.projectId, task.id, (message) => sent.push(message));
+  await runtime.start(fake.ctx);
+  await runtime.agentStart(fake.ctx);
+  const baseline = (await store.requireTask(project.projectId, task.id)).runtime?.reportBaselineAt;
+  const coordinator = new LeadCoordinator(store, async () => ({ stdout: "", stderr: "", code: 0 }), { command: "pi", leadingArgs: [] });
+  await coordinator.report(project.projectId, task.id, { status: "blocked", blockedReason: "Waiting safely", summary: "Valid nonterminal report" });
+  const reported = await store.requireTask(project.projectId, task.id);
+  assert.equal(reported.runtime?.reportBaselineAt, baseline);
+  assert.ok(reported.runtime?.lastReportAt);
+  await runtime.settled(fake.ctx);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sent.length, 0);
+  assert.equal((await store.requireTask(project.projectId, task.id)).runtime?.reportNudgeState, undefined);
   await runtime.shutdown("reload");
 });
 
