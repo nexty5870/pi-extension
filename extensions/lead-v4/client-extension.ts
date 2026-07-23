@@ -112,6 +112,7 @@ export default function leadV4Extension(pi: ExtensionAPI) {
   const workerRole = process.env.PI_LEAD_V4_ROLE;
   const featureId = process.env.PI_LEAD_V4_FEATURE_ID;
   const featureToken = process.env.PI_LEAD_V4_FEATURE_TOKEN;
+  const featureLaunchGeneration = featureId ? Number(process.env.PI_LEAD_V4_LEAD_GENERATION) : undefined;
   const sessionGeneration = Number(process.env.PI_LEAD_V4_SESSION_GENERATION ?? "1");
   const instanceGeneration = randomUUID();
   const runtimeScript = join(dirname(__filename), "runtime", "supervisor.mjs");
@@ -174,11 +175,11 @@ export default function leadV4Extension(pi: ExtensionAPI) {
     }
   };
 
-  const deliverDigest = async (ctx: ExtensionContext, includeTelemetry: boolean, triggerTurn: boolean): Promise<void> => {
+  const deliverDigest = async (ctx: ExtensionContext, includeTelemetry: boolean, triggerTurn: boolean, extendPending = false): Promise<void> => {
     const currentSession = session;
     if (!current(ctx) || isWorker || !currentSession?.attachment) return;
     await flushDigestAcks(ctx);
-    if (pendingDigestAcks.length > 0) return;
+    if (pendingDigestAcks.length > 0 && !extendPending) return;
     const attachment = currentSession.attachment;
     const batch = await rpc<DigestBatch | undefined>("claimDigest", {
       input: { attachmentId: attachment.id, ownershipToken: attachment.ownershipToken, includeTelemetry },
@@ -193,7 +194,9 @@ export default function leadV4Extension(pi: ExtensionAPI) {
     // Acknowledge only on a later callback after the exact batch receipt is
     // visible in the Pi session tree. A Lead killed at claim/send/ack boundaries
     // therefore gets safe at-least-once replay instead of silent loss.
-    pendingDigestAcks.push(batch);
+    const existing = pendingDigestAcks.findIndex((candidate) => candidate.id === batch.id);
+    if (existing >= 0) pendingDigestAcks[existing] = batch;
+    else pendingDigestAcks.push(batch);
   };
 
   const refreshStatus = async (ctx: ExtensionContext): Promise<V4StatusSnapshot | undefined> => {
@@ -282,6 +285,7 @@ export default function leadV4Extension(pi: ExtensionAPI) {
         availableModels,
         featureId,
         featureOwnershipToken: featureToken,
+        featureLaunchGeneration,
         inherited: { model: modelName(ctx), thinking: pi.getThinkingLevel() },
       } });
       session.attachment = attached.attachment;
@@ -345,6 +349,7 @@ export default function leadV4Extension(pi: ExtensionAPI) {
       availableModels: ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`),
       featureId,
       featureOwnershipToken: featureToken,
+      featureLaunchGeneration,
       inherited: { model: actualModel, thinking: pi.getThinkingLevel() },
     } });
     currentSession.attachment = attached.attachment;
@@ -376,6 +381,7 @@ export default function leadV4Extension(pi: ExtensionAPI) {
       availableModels: ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`),
       featureId,
       featureOwnershipToken: featureToken,
+      featureLaunchGeneration,
       inherited: { model: actualModel, thinking: event.level },
     } });
     currentSession.attachment = attached.attachment;
@@ -591,10 +597,13 @@ export default function leadV4Extension(pi: ExtensionAPI) {
       label: "Claim Unowned Feature",
       description: "Claim an unowned feature after its prior owner's fenced lease expired. Existing workers remain unchanged.",
       parameters: Type.Object({ featureId: Type.String(), expectedOwnerGeneration: Type.Integer({ minimum: 1 }) }),
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const lead = attachment();
         const feature = await rpc("claimFeature", { input: { attachmentId: lead.id, ownershipToken: lead.ownershipToken, featureId: params.featureId, expectedOwnerGeneration: params.expectedOwnerGeneration } });
-        return textResult(`Claimed feature ${params.featureId}.`, { feature });
+        // Replacement ownership must not wait for a later idle poll/session
+        // restart: claim and deliver every pending completion/CI telemetry row.
+        await deliverDigest(ctx, true, false, true);
+        return textResult(`Claimed feature ${params.featureId}; its bounded all-pending digest was delivered.`, { feature });
       },
     });
 

@@ -25,6 +25,7 @@ export interface V4TransportOptions {
   stateDir: string;
   extensionPath?: string;
   piCommand?: string;
+  handshakeTimeoutMs?: number;
 }
 
 interface RpcResponse<T> {
@@ -90,28 +91,40 @@ async function rawRequest<T>(socketPath: string, request: Record<string, unknown
   });
 }
 
-async function handshake(socketPath: string, stateRootHash: string): Promise<SupervisorHandshake> {
+function isProvenStalePathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  // Only these kernel connect results prove that no daemon is accepting on the
+  // pathname. Timeouts, access failures, resets, and malformed replies may all
+  // come from a live or transiently unhealthy daemon and must fail closed.
+  return code === "ENOENT" || code === "ECONNREFUSED";
+}
+
+async function handshake(socketPath: string, stateRootHash: string, timeoutMs = 5_000): Promise<SupervisorHandshake> {
   const result = await rawRequest<SupervisorHandshake>(socketPath, {
     id: randomUUID(),
     protocolVersion: V4_PROTOCOL_VERSION,
     method: "handshake",
     params: { buildId: V4_BUILD_ID, schemaVersion: V4_SCHEMA_VERSION, stateRootHash },
-  });
+  }, timeoutMs);
   if (result.protocolVersion !== V4_PROTOCOL_VERSION || result.schemaVersion !== V4_SCHEMA_VERSION || result.buildId !== V4_BUILD_ID) {
     throw Object.assign(new Error(`V4 supervisor protocol/build mismatch: expected ${V4_PROTOCOL_VERSION}/${V4_SCHEMA_VERSION}/${V4_BUILD_ID}, got ${result.protocolVersion}/${result.schemaVersion}/${result.buildId}`), { code: "EPROTO" });
   }
   return result;
 }
 
-async function waitForHandshake(socketPath: string, stateRootHash: string, timeoutMs = 10_000): Promise<SupervisorHandshake> {
+async function waitForHandshake(socketPath: string, stateRootHash: string, timeoutMs = 10_000, requestTimeoutMs = 5_000): Promise<SupervisorHandshake> {
   const started = Date.now();
   let last: unknown;
   while (Date.now() - started < timeoutMs) {
     try {
-      return await handshake(socketPath, stateRootHash);
+      return await handshake(socketPath, stateRootHash, requestTimeoutMs);
     } catch (error) {
       last = error;
-      if ((error as NodeJS.ErrnoException).code === "EPROTO") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      // EAGAIN is the authenticated protocol's explicit pre-ready response. It
+      // may be retried only while waiting on a known bootstrap owner; it never
+      // establishes staleness and never permits unlink/spawn.
+      if (!isProvenStalePathError(error) && code !== "EAGAIN") throw error;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
@@ -139,11 +152,11 @@ export class V4TransportClient {
     await mkdir(this.runtimeDir, { recursive: true, mode: 0o700 });
     await chmod(this.runtimeDir, 0o700);
     try {
-      const ready = await handshake(this.socketPath, this.stateRootHash);
+      const ready = await handshake(this.socketPath, this.stateRootHash, this.options.handshakeTimeoutMs);
       await this.bindHandshake(ready);
       return ready;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EPROTO") throw error;
+      if (!isProvenStalePathError(error)) throw error;
     }
 
     let lock;
@@ -160,22 +173,22 @@ export class V4TransportClient {
         await rm(this.bootstrapPath, { force: true });
         return this.ensure();
       }
-      const ready = await waitForHandshake(this.socketPath, this.stateRootHash);
+      const ready = await waitForHandshake(this.socketPath, this.stateRootHash, 10_000, this.options.handshakeTimeoutMs);
       await this.bindHandshake(ready);
       return ready;
     }
 
     try {
       try {
-        const ready = await handshake(this.socketPath, this.stateRootHash);
+        const ready = await handshake(this.socketPath, this.stateRootHash, this.options.handshakeTimeoutMs);
         await this.bindHandshake(ready);
         return ready;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EPROTO") throw error;
+        if (!isProvenStalePathError(error)) throw error;
       }
-      // Connect-first and recheck both failed while this process owns the O_EXCL
-      // bootstrap lock. Only now may a stale pathname be removed. The daemon's
-      // kernel bind remains authoritative; EADDRINUSE is never unlinked/retried.
+      // Connect-first and recheck both produced ENOENT/ECONNREFUSED while this
+      // process owns the O_EXCL lock. Only those documented stale-path results
+      // permit unlink/bootstrap. EADDRINUSE remains kernel-authoritative.
       await rm(this.socketPath, { force: true });
       const inheritedEnvironment = Object.fromEntries([
         "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "CMUX_SOCKET_PATH", "PI_CODING_AGENT_DIR",
@@ -195,7 +208,7 @@ export class V4TransportClient {
         },
       });
       child.unref();
-      const ready = await waitForHandshake(this.socketPath, this.stateRootHash);
+      const ready = await waitForHandshake(this.socketPath, this.stateRootHash, 10_000, this.options.handshakeTimeoutMs);
       await this.bindHandshake(ready);
       return ready;
     } finally {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
@@ -69,18 +69,78 @@ test("20 concurrent bootstraps produce one private durable supervisor and SIGKIL
   assert.equal(recovered.supervisorGeneration, 2);
 });
 
-test("connect-first bootstrap safely removes a stale socket pathname only after failed handshake", async (t) => {
+test("connect-first bootstrap removes only a proven ECONNREFUSED orphaned socket", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "lead-v4-stale-socket-"));
   const runtimeDir = join(root, "run");
   const stateDir = join(root, "state");
   await import("node:fs/promises").then(({ mkdir }) => mkdir(runtimeDir, { recursive: true, mode: 0o700 }));
-  await writeFile(join(runtimeDir, "supervisor.sock"), "stale", { mode: 0o600 });
+  const socketPath = join(runtimeDir, "supervisor.sock");
+  const owner = spawn(process.execPath, [
+    "-e",
+    "require('node:net').createServer(() => {}).listen(process.argv[1], () => process.stdout.write('ready\\n')); setInterval(() => {}, 1000)",
+    socketPath,
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  await new Promise<void>((resolveReady, rejectReady) => {
+    owner.stdout.once("data", () => resolveReady());
+    owner.once("error", rejectReady);
+    owner.once("exit", (code) => rejectReady(new Error(`stale socket owner exited early: ${code}`)));
+  });
+  const ownerExit = new Promise<void>((resolveExit) => owner.once("exit", () => resolveExit()));
+  owner.kill("SIGKILL");
+  await ownerExit;
+  assert.equal((await stat(socketPath)).isSocket(), true);
   const client = new V4TransportClient({ runtimeDir, runtimeScript, stateDir });
   const handshake = await client.ensure();
   t.after(() => {
     try { process.kill(handshake.pid, "SIGTERM"); } catch { /* already stopped */ }
   });
   assert.ok(handshake.pid > 0);
+});
+
+test("a nonresponding live socket times out closed without unlink or bootstrap", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "lead-v4-hung-socket-"));
+  const runtimeDir = join(root, "run");
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(runtimeDir, { recursive: true, mode: 0o700 }));
+  const socketPath = join(runtimeDir, "supervisor.sock");
+  const server = createServer(() => {
+    // Deliberately accept and retain the connection without replying. This is a
+    // live daemon pathname, never evidence that unlink/bootstrap is safe.
+  });
+  await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+  t.after(() => server.close());
+  const client = new V4TransportClient({
+    runtimeDir,
+    runtimeScript,
+    stateDir: join(root, "state"),
+    handshakeTimeoutMs: 100,
+  });
+  await assert.rejects(() => client.ensure(), (error: NodeJS.ErrnoException) => error.code === "ETIMEDOUT");
+  assert.equal((await stat(socketPath)).isSocket(), true);
+  assert.equal(await stat(client.bootstrapPath).then(() => true, () => false), false);
+});
+
+test("malformed and EACCES handshake replies fail closed without bootstrap", async () => {
+  for (const scenario of ["malformed", "access-denied"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `lead-v4-${scenario}-`));
+    const runtimeDir = join(root, "run");
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(runtimeDir, { recursive: true, mode: 0o700 }));
+    const socketPath = join(runtimeDir, "supervisor.sock");
+    const server = createServer((socket) => {
+      socket.once("data", (chunk) => {
+        if (scenario === "malformed") socket.end("{not-json}\n");
+        else {
+          const request = JSON.parse(String(chunk).trim()) as { id: string };
+          socket.end(`${JSON.stringify({ id: request.id, ok: false, error: "denied", code: "EACCES" })}\n`);
+        }
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+    const client = new V4TransportClient({ runtimeDir, runtimeScript, stateDir: join(root, "state") });
+    await assert.rejects(() => client.ensure(), scenario === "malformed" ? /JSON/ : /denied/);
+    assert.equal((await stat(socketPath)).isSocket(), true);
+    assert.equal(await stat(client.bootstrapPath).then(() => true, () => false), false);
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  }
 });
 
 test("protocol/build mismatch fails closed and never unlinks the existing socket", async (t) => {

@@ -26,6 +26,13 @@ test("V4 Pi lifecycle fences stale instances and blocks worker session replaceme
   assert.match(source, /session\.sessionId === ctx\.sessionManager\.getSessionId\(\)/);
 });
 
+test("replacement feature claim immediately requests an all-pending telemetry digest", async () => {
+  const source = await readFile("extensions/lead-v4/client-extension.ts", "utf8");
+  const claim = source.slice(source.indexOf('name: "lead_v4_claim_feature"'), source.indexOf('name: "lead_v4_status"'));
+  assert.match(claim, /await rpc\("claimFeature"/);
+  assert.match(claim, /await deliverDigest\(ctx, true, false, true\)/);
+});
+
 test("V4 has no cmux close command or in_window liveness dependency", async () => {
   const runtime = await readFile("extensions/lead-v4/runtime-adapter.ts", "utf8");
   const client = await readFile("extensions/lead-v4/client-extension.ts", "utf8");

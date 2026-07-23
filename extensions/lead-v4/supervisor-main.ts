@@ -92,7 +92,11 @@ async function dispatch(method: string, params: Record<string, unknown>): Promis
     }
     case "claimDigest": return runtime.core.claimDigest(params.input as never);
     case "acknowledgeDigest": return runtime.core.acknowledgeDigest(params.input as never);
-    case "stopTask": return runtime.core.stopTask(params.input as never);
+    case "stopTask": {
+      const task = await runtime.core.stopTask(params.input as never);
+      runtime.adapter.abortWorkerLaunch(task.id);
+      return task;
+    }
     case "status": return runtime.core.status();
     case "rollbackCheck": {
       const snapshot = await runtime.core.status();

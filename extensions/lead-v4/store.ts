@@ -184,6 +184,12 @@ export class V4Store {
         projectRoot: resolve(projectRoot),
         projectName,
         config: effectiveV4Config({ ...existing.config, ...config }),
+        features: Object.fromEntries(Object.values(existing.features).map((feature) => [feature.id, {
+          ...feature,
+          leadLaunchGeneration: feature.leadLaunchGeneration ?? (
+            Object.values(existing.attachments).some((attachment) => attachment.featureId === feature.id) ? 1 : feature.leadLaunchState === "attached" ? 0 : 1
+          ),
+        }])),
         legacyV2: existing.legacyV2 ?? [],
         operations: existing.operations ?? {},
         updatedAt: at,

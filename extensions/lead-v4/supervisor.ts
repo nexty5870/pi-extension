@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { resolveModelSelection, attestActualModel } from "./model.ts";
-import { fairLeadLaunches, fairWorkerLaunches } from "./scheduler.ts";
+import { activeLeadProcessCount, fairLeadLaunches, fairWorkerLaunches } from "./scheduler.ts";
 import type { V4Store } from "./store.ts";
 import { assertStableUuid } from "./topology.ts";
 import type {
@@ -96,6 +96,7 @@ export interface AttachInput {
   availableModels: string[];
   featureId?: string;
   featureOwnershipToken?: string;
+  featureLaunchGeneration?: number;
   inherited?: ModelSelection;
 }
 
@@ -149,6 +150,31 @@ export class V4SupervisorCore {
       if (previous && (previous.ownershipToken !== input.attachmentOwnershipToken || previous.sessionId !== input.sessionId)) {
         throw new Error("Attachment ID is fenced to another token or Pi session");
       }
+      const spawnedFeature = input.featureId ? current.features[input.featureId] : undefined;
+      let replacesUnattachedLaunch = false;
+      if (input.featureId) {
+        if (!spawnedFeature) throw new Error(`Unknown spawned Lead feature ${input.featureId}`);
+        if (spawnedFeature.ownershipToken !== input.featureOwnershipToken
+          || spawnedFeature.leadLaunchGeneration !== input.featureLaunchGeneration) {
+          throw new Error("Spawned Lead feature token/generation is stale");
+        }
+        const priorOwner = spawnedFeature.ownerAttachmentId ? current.attachments[spawnedFeature.ownerAttachmentId] : undefined;
+        if (priorOwner?.state === "attached" && spawnedFeature.ownerAttachmentId !== id) {
+          throw new Error(`Feature is already attached to Lead ${priorOwner.id}`);
+        }
+        const attachableLaunch = spawnedFeature.leadLaunchState === "launching" || spawnedFeature.leadLaunchState === "launched";
+        const detachedReload = spawnedFeature.leadLaunchState === "attached" && priorOwner?.state !== "attached";
+        if (!attachableLaunch && !detachedReload && spawnedFeature.ownerAttachmentId !== id) {
+          throw new Error("Spawned Lead launch is no longer attachable");
+        }
+        replacesUnattachedLaunch = attachableLaunch && !spawnedFeature.ownerAttachmentId;
+      }
+      const addsAttachedProcess = previous?.state !== "attached";
+      if (addsAttachedProcess
+        && !replacesUnattachedLaunch
+        && activeLeadProcessCount(current) >= current.config.maxConcurrentLeads) {
+        throw new Error(`V4 Lead capacity is full (${current.config.maxConcurrentLeads}); attachment refused`);
+      }
       attached = {
         id,
         ownershipToken: previous?.ownershipToken ?? token(),
@@ -167,19 +193,18 @@ export class V4SupervisorCore {
       };
       const attachments = { ...current.attachments, [id]: attached };
       let features = current.features;
-      if (input.featureId && current.features[input.featureId]) {
-        const feature = current.features[input.featureId];
-        if (feature.ownershipToken !== input.featureOwnershipToken) throw new Error("Spawned Lead feature ownership token is invalid");
-        const priorOwner = feature.ownerAttachmentId ? current.attachments[feature.ownerAttachmentId] : undefined;
-        if (!feature.ownerAttachmentId || feature.ownerAttachmentId === id || priorOwner?.state === "detached" || priorOwner?.state === "dead") {
+      if (spawnedFeature) {
+        const priorOwner = spawnedFeature.ownerAttachmentId ? current.attachments[spawnedFeature.ownerAttachmentId] : undefined;
+        if (!spawnedFeature.ownerAttachmentId || spawnedFeature.ownerAttachmentId === id || priorOwner?.state === "detached" || priorOwner?.state === "dead") {
           features = {
             ...features,
-            [feature.id]: {
-              ...feature,
+            [spawnedFeature.id]: {
+              ...spawnedFeature,
               ownerAttachmentId: id,
               ownerAssignedAt: now(),
-              ownerGeneration: feature.ownerGeneration + Number(feature.ownerAttachmentId !== id),
+              ownerGeneration: spawnedFeature.ownerGeneration + Number(spawnedFeature.ownerAttachmentId !== id),
               leadLaunchState: "attached",
+              leadProcessPid: input.pid,
               leadCmux: input.cmux,
               updatedAt: now(),
             },
@@ -285,6 +310,7 @@ export class V4SupervisorCore {
       };
       const leadResolution = resolveModelSelection({
         explicit: input.leadSelection,
+        spawningLead: inheritedSelection,
         featurePreset: input.preset,
         roleProject: roleProjectSelection(current, "lead"),
         inheritedLead: attachment.inherited ?? inheritedSelection,
@@ -305,6 +331,7 @@ export class V4SupervisorCore {
         preset: input.preset,
         leadResolution,
         leadLaunchState: input.spawnLead ? "queued" : "attached",
+        leadLaunchGeneration: input.spawnLead ? 1 : 0,
         leadCmux: input.spawnLead ? undefined : attachment.cmux,
         taskIds: [],
         eventCursors: {},
@@ -381,7 +408,9 @@ export class V4SupervisorCore {
       };
       const resolved = resolveModelSelection({
         explicit: input.selection,
-        spawningLead: attachment.featureId === feature.id ? inheritedSelection : undefined,
+        // The attachment invoking this operation is the actual spawning Lead,
+        // including a root Lead that directly owns the feature.
+        spawningLead: inheritedSelection,
         featurePreset: feature.preset,
         roleProject: roleProjectSelection(current, input.role),
         inheritedLead: attachment.inherited ?? inheritedSelection,
@@ -448,8 +477,10 @@ export class V4SupervisorCore {
       if (!task) throw new Error(`Unknown V4 worker ${input.taskId}`);
       if (task.runtime.ownershipToken !== input.ownershipToken
         || task.runtime.sessionGeneration !== input.sessionGeneration
-        || task.sessionId !== input.sessionId) {
-        throw new Error("Worker hello failed generation/token/session fencing; generation is quarantined");
+        || task.sessionId !== input.sessionId
+        || task.status !== "starting"
+        || task.processState !== "launching") {
+        throw new Error("Worker hello failed launch/generation/token/session fencing; generation is quarantined");
       }
       if (task.cmux && !sameIdentity(task.cmux, input.cmux)) {
         mismatch = "Worker hello cmux UUID tuple differs from the persisted launch result";
@@ -704,12 +735,17 @@ export class V4SupervisorCore {
       const attachment = this.requireAttachment(current, input.attachmentId, input.ownershipToken);
       const owned = new Set(Object.values(current.features).filter((feature) => feature.ownerAttachmentId === attachment.id).map((feature) => feature.id));
       const existingClaim = current.events.filter((event) => !event.observedAt && event.claim?.attachmentId === attachment.id);
-      const candidates = existingClaim.length > 0 ? existingClaim : current.events.filter((event) => {
-        if (event.observedAt || !owned.has(event.featureId)) return false;
+      const existingIds = new Set(existingClaim.map((event) => event.id));
+      const newlyOwned = current.events.filter((event) => {
+        if (existingIds.has(event.id) || event.observedAt || !owned.has(event.featureId)) return false;
         if (!input.includeTelemetry && !event.actionable) return false;
         if (!event.claim) return true;
         return Date.now() - Date.parse(event.claim.claimedAt) > 30_000;
       });
+      // A replacement claim may add ownership while this attachment already has
+      // an in-flight batch. Extend that same batch instead of delaying telemetry
+      // until a later acknowledgement/session callback.
+      const candidates = [...existingClaim, ...newlyOwned];
       if (candidates.length === 0) return current;
       const batchId = existingClaim[0]?.claim?.batchId ?? randomUUID();
       const claimedAt = now();
@@ -795,8 +831,30 @@ export class V4SupervisorCore {
       if (!task) throw new Error(`Unknown task ${input.taskId}`);
       const feature = current.features[task.featureId];
       if (feature?.ownerAttachmentId !== attachment.id) throw new Error("Only the feature owner may stop its worker");
-      stopped = { ...task, status: "stopped", summary: input.reason, runtime: { ...task.runtime, terminalAt: now() }, updatedAt: now() };
-      return appendEvent({ ...current, tasks: { ...current.tasks, [task.id]: stopped } }, { featureId: task.featureId, taskId: task.id, kind: "telemetry", actionable: false, summary: `Stop requested for ${task.id.slice(0, 8)}; surface retention remains enabled` });
+      if (task.status === "stopped") {
+        stopped = task;
+        return current;
+      }
+      const cancelLaunch = task.processState === "queued" || task.processState === "launching";
+      stopped = {
+        ...task,
+        status: "stopped",
+        processState: cancelLaunch ? "stopped" : task.processState,
+        summary: input.reason,
+        runtime: cancelLaunch
+          ? { ...task.runtime, ownershipToken: token(), sessionGeneration: task.runtime.sessionGeneration + 1, terminalAt: now() }
+          : { ...task.runtime, terminalAt: now() },
+        updatedAt: now(),
+      };
+      return appendEvent({ ...current, tasks: { ...current.tasks, [task.id]: stopped } }, {
+        featureId: task.featureId,
+        taskId: task.id,
+        kind: "telemetry",
+        actionable: false,
+        summary: cancelLaunch
+          ? `Stop atomically cancelled the queued/launching generation for ${task.id.slice(0, 8)}; surface retention remains enabled`
+          : `Stop requested for ${task.id.slice(0, 8)}; surface retention remains enabled`,
+      });
     });
     return stopped;
   }
@@ -838,7 +896,8 @@ export class V4SupervisorCore {
       // Persist launch intents before any irreversible cmux operation. Runtime
       // adapters must record exact UUID results before sending launch text.
       const features = { ...next.features };
-      for (const feature of leads) features[feature.id] = { ...feature, leadLaunchState: "launching", updatedAt: now() };
+      leads = leads.map((feature) => ({ ...feature, leadLaunchState: "launching" as const, leadLaunchStartedAt: now(), leadProcessPid: undefined, leadCmux: undefined, updatedAt: now() }));
+      for (const feature of leads) features[feature.id] = feature;
       const tasks = { ...next.tasks };
       for (const task of workers) tasks[task.id] = { ...task, status: "starting", processState: "launching", updatedAt: now() };
       return { ...next, features, tasks, schedulerCursor: workers.at(-1)?.featureId ?? next.schedulerCursor };
@@ -880,12 +939,35 @@ export class V4SupervisorCore {
     });
   }
 
-  async recordLeadSurface(featureId: string, identity: StableCmuxIdentity): Promise<void> {
+  async recordLeadSurface(
+    featureId: string,
+    identity: StableCmuxIdentity,
+    launch: { ownershipToken: string; generation: number; processPid?: number },
+  ): Promise<void> {
     assertIdentity(identity);
     await this.store.update((current) => {
       const feature = current.features[featureId];
-      if (!feature || feature.leadLaunchState !== "launching") throw new Error("Lead launch intent is not active");
-      return { ...current, features: { ...current.features, [feature.id]: { ...feature, leadCmux: identity, leadLaunchState: "launched", updatedAt: now() } } };
+      if (!feature
+        || feature.ownershipToken !== launch.ownershipToken
+        || feature.leadLaunchGeneration !== launch.generation
+        || (feature.leadLaunchState !== "launching" && feature.leadLaunchState !== "attached")) {
+        throw new Error("Lead launch intent failed token/generation fencing");
+      }
+      const owner = feature.ownerAttachmentId ? current.attachments[feature.ownerAttachmentId] : undefined;
+      if (owner && !sameIdentity(owner.cmux, identity)) throw new Error("Attached Lead cmux identity differs from its launch result");
+      return {
+        ...current,
+        features: {
+          ...current.features,
+          [feature.id]: {
+            ...feature,
+            leadCmux: identity,
+            leadProcessPid: owner?.pid ?? launch.processPid,
+            leadLaunchState: owner ? "attached" : "launched",
+            updatedAt: now(),
+          },
+        },
+      };
     });
   }
 
@@ -897,36 +979,89 @@ export class V4SupervisorCore {
         next = appendEvent({ ...next, tasks: { ...next.tasks, [task.id]: updated } }, { featureId: task.featureId, taskId: task.id, kind: "runtime", actionable: true, summary: `Incomplete launch for ${task.id.slice(0, 8)} is UNKNOWN after supervisor restart; no duplicate launch is allowed` });
       }
       for (const feature of Object.values(next.features).filter((candidate) => candidate.leadLaunchState === "launching")) {
-        const updated = { ...feature, leadLaunchState: "unowned" as const, updatedAt: now() };
+        const updated = {
+          ...feature,
+          ownershipToken: token(),
+          leadLaunchGeneration: feature.leadLaunchGeneration + 1,
+          leadLaunchState: "unowned" as const,
+          updatedAt: now(),
+        };
         next = appendEvent({ ...next, features: { ...next.features, [feature.id]: updated } }, {
           featureId: feature.id,
           kind: "runtime",
           actionable: true,
-          summary: `Incomplete feature Lead launch is UNKNOWN after supervisor restart; any possibly-live Lead workspace is retained`,
+          summary: `Incomplete feature Lead launch is fenced UNKNOWN after supervisor restart; any possibly-live Lead workspace is retained`,
         });
       }
       return next;
     });
   }
 
-  async markLeadLaunchUnknown(featureId: string, reason: string): Promise<void> {
+  async markLeadLaunchUnknown(featureId: string, reason: string, launch?: { ownershipToken: string; generation: number }): Promise<void> {
     await this.store.update((current) => {
       const feature = current.features[featureId];
-      if (!feature) return current;
-      const updated = { ...feature, leadLaunchState: "unowned" as const, updatedAt: now() };
+      if (!feature || feature.ownerAttachmentId || feature.leadLaunchState !== "launching") return current;
+      if (launch && (feature.ownershipToken !== launch.ownershipToken || feature.leadLaunchGeneration !== launch.generation)) return current;
+      const updated = {
+        ...feature,
+        ownershipToken: token(),
+        leadLaunchGeneration: feature.leadLaunchGeneration + 1,
+        leadLaunchState: "unowned" as const,
+        updatedAt: now(),
+      };
       return appendEvent({ ...current, features: { ...current.features, [feature.id]: updated } }, {
         featureId: feature.id,
         kind: "runtime",
         actionable: true,
-        summary: `Feature Lead launch outcome UNKNOWN: ${reason}. A possibly-live Lead workspace is never closed or relaunched automatically.`,
+        summary: `Feature Lead launch outcome UNKNOWN and its generation was fenced: ${reason}. A possibly-live Lead workspace is never relaunched automatically.`,
       });
     });
+  }
+
+  async reconcileUnattachedLead(input: {
+    featureId: string;
+    ownershipToken: string;
+    launchGeneration: number;
+    processPid?: number;
+    retry: boolean;
+    reason: string;
+  }): Promise<boolean> {
+    let reconciled = false;
+    await this.store.update((current) => {
+      const feature = current.features[input.featureId];
+      if (!feature
+        || feature.ownerAttachmentId
+        || (feature.leadLaunchState !== "launching" && feature.leadLaunchState !== "launched")
+        || feature.ownershipToken !== input.ownershipToken
+        || feature.leadLaunchGeneration !== input.launchGeneration
+        || feature.leadProcessPid !== input.processPid) return current;
+      reconciled = true;
+      const updated = {
+        ...feature,
+        ownershipToken: token(),
+        leadLaunchGeneration: feature.leadLaunchGeneration + 1,
+        leadLaunchState: input.retry ? "queued" as const : "unowned" as const,
+        leadLaunchStartedAt: undefined,
+        leadProcessPid: undefined,
+        leadCmux: undefined,
+        updatedAt: now(),
+      };
+      return appendEvent({ ...current, features: { ...current.features, [feature.id]: updated } }, {
+        featureId: feature.id,
+        kind: "runtime",
+        actionable: !input.retry,
+        summary: input.retry
+          ? `Spawned Lead exited before attachment; fenced generation ${input.launchGeneration} was safely requeued (${input.reason})`
+          : `Spawned Lead timed out before attachment; fenced generation ${input.launchGeneration} released capacity (${input.reason})`,
+      });
+    });
+    return reconciled;
   }
 
   async markLaunchUnknown(taskId: string, reason: string): Promise<void> {
     await this.store.update((current) => {
       const task = current.tasks[taskId];
-      if (!task) return current;
+      if (!task || !["launching", "running"].includes(task.processState) || task.status === "stopped") return current;
       const updated = { ...task, processState: "unknown" as const, runtime: { ...task.runtime, crashReason: reason }, updatedAt: now() };
       return appendEvent({ ...current, tasks: { ...current.tasks, [task.id]: updated } }, { featureId: task.featureId, taskId: task.id, kind: "runtime", actionable: true, summary: `Launch outcome UNKNOWN: ${reason}. Duplicate launch, resume, reuse, and cleanup are forbidden.` });
     });

@@ -83,6 +83,9 @@ export interface FeatureTrack {
   preset?: ModelSelection;
   leadResolution?: ResolvedModelSelection;
   leadLaunchState: "attached" | "queued" | "launching" | "launched" | "unowned";
+  leadLaunchGeneration: number;
+  leadLaunchStartedAt?: string;
+  leadProcessPid?: number;
   leadCmux?: StableCmuxIdentity;
   taskIds: string[];
   eventCursors: Record<string, number>;

@@ -8,7 +8,7 @@ import { basename as basename3, join as join4, resolve as resolve3 } from "node:
 import { createHash as createHash2, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chmod, mkdir as mkdir2, writeFile } from "node:fs/promises";
+import { chmod, mkdir as mkdir2, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // extensions/lead/git.ts
@@ -280,6 +280,15 @@ var execFileAsync = promisify(execFile);
 function quote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
+function livePid(pid) {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
 function object(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
 }
@@ -342,18 +351,31 @@ var V4RuntimeAdapter = class {
   }
   git;
   agentsWorkspaceCreation;
+  workerLaunches = /* @__PURE__ */ new Map();
+  leadAbsenceEvidence = /* @__PURE__ */ new Map();
   cmuxSocketPath = process.env.CMUX_SOCKET_PATH;
   execute;
   setCmuxSocketPath(path) {
     if (path) this.cmuxSocketPath = path;
   }
-  async cmux(args, cwd, timeout = 3e4) {
-    const result = await this.execute("cmux", ["--json", "--id-format", "both", ...args], { cwd, timeout });
+  async cmux(args, cwd, timeout = 3e4, signal) {
+    const result = await this.execute("cmux", ["--json", "--id-format", "both", ...args], { cwd, timeout, signal });
     if (result.code !== 0) throw new Error(`cmux ${args[0]} failed: ${result.stderr.trim() || result.stdout.trim()}`);
     return parseJson(result.stdout, args[0]);
   }
   fail(name) {
     if (this.failpoint === name) throw new Error(`Injected V4 failpoint: ${name}`);
+  }
+  abortWorkerLaunch(taskId) {
+    this.workerLaunches.get(taskId)?.abort(new Error("Worker launch was stopped by its owning Lead"));
+  }
+  async workerLaunchIsActive(task, core) {
+    const current = (await core.status()).tasks.find((candidate) => candidate.id === task.id);
+    return Boolean(current && current.status === "starting" && current.processState === "launching" && current.runtime.ownershipToken === task.runtime.ownershipToken && current.runtime.sessionGeneration === task.runtime.sessionGeneration);
+  }
+  async leadLaunchIsCurrent(feature, core) {
+    const current = (await core.status()).features.find((candidate) => candidate.id === feature.id);
+    return Boolean(current && (current.leadLaunchState === "launching" || current.leadLaunchState === "attached") && current.ownershipToken === feature.ownershipToken && current.leadLaunchGeneration === feature.leadLaunchGeneration);
   }
   async ensureAgentsWorkspace(state, core) {
     if (state.agentsWorkspace) {
@@ -404,20 +426,25 @@ var V4RuntimeAdapter = class {
     return workspace;
   }
   async launchWorker(state, original, core) {
-    const current = (await core.status()).tasks.find((task) => task.id === original.id);
-    if (!current || current.processState !== "launching") return;
+    if (this.workerLaunches.has(original.id)) return;
+    const controller = new AbortController();
+    this.workerLaunches.set(original.id, controller);
     try {
+      const current = (await core.status()).tasks.find((task2) => task2.id === original.id);
+      if (!current || !await this.workerLaunchIsActive(original, core)) return;
       let task = current;
       if (task.role === "implementation" && !task.baseSha) {
         this.fail("before-worktree-create");
-        const project = await this.git.inspect(state.projectRoot);
+        const project = await this.git.inspect(state.projectRoot, controller.signal);
         const created2 = await this.git.create(project, {
           taskId: task.id,
           title: task.title,
           baseBranch: task.baseBranch,
-          destination: task.worktreePath
+          destination: task.worktreePath,
+          signal: controller.signal
         });
         this.fail("after-worktree-create-before-record");
+        if (!await this.workerLaunchIsActive(original, core)) return;
         await core.recordWorkerProvision(task.id, {
           worktreePath: created2.path,
           baseBranch: created2.baseBranch,
@@ -431,7 +458,8 @@ var V4RuntimeAdapter = class {
       if (task.role === "review") {
         const parent = task.parentTaskId ? refreshedState.tasks[task.parentTaskId] : void 0;
         if (!parent?.baseSha) throw new Error("Review parent has no persisted base SHA");
-        const capture = await this.git.reviewPacket(parent.worktreePath, parent.baseSha);
+        const capture = await this.git.reviewPacket(parent.worktreePath, parent.baseSha, controller.signal);
+        if (!await this.workerLaunchIsActive(original, core)) return;
         await core.recordReviewTarget(task.id, {
           parentTaskId: parent.id,
           diffHash: capture.diffHash,
@@ -458,6 +486,7 @@ var V4RuntimeAdapter = class {
         refreshedState = await this.readState(core, state);
       }
       const agents = await this.ensureAgentsWorkspace(refreshedState, core);
+      if (!await this.workerLaunchIsActive(original, core)) return;
       this.fail("before-worker-surface-create");
       const created = await this.cmux([
         "new-surface",
@@ -471,8 +500,9 @@ var V4RuntimeAdapter = class {
         task.worktreePath,
         "--focus",
         "false"
-      ], state.projectRoot);
+      ], state.projectRoot, 3e4, controller.signal);
       this.fail("after-worker-surface-create-before-record");
+      if (!await this.workerLaunchIsActive(original, core)) return;
       const identity = identityFrom(created, {
         windowUuid: agents.windowUuid,
         workspaceUuid: agents.workspaceUuid,
@@ -487,6 +517,7 @@ var V4RuntimeAdapter = class {
       await writeFile(assignmentPath, this.workerPrompt(task, reviewEvidence), { encoding: "utf8", mode: 384 });
       await writeFile(scriptPath, this.workerScript(task, assignmentPath, state.projectRoot), { encoding: "utf8", mode: 448 });
       await chmod(scriptPath, 448);
+      if (!await this.workerLaunchIsActive(original, core)) return;
       const send = await this.execute("cmux", [
         "send",
         "--workspace",
@@ -495,9 +526,10 @@ var V4RuntimeAdapter = class {
         identity.surfaceUuid,
         "--",
         `exec ${quote(scriptPath)}`
-      ], { cwd: state.projectRoot, timeout: 3e4 });
+      ], { cwd: state.projectRoot, timeout: 3e4, signal: controller.signal });
       if (send.code !== 0) throw new Error(`cmux send failed: ${send.stderr || send.stdout}`);
       this.fail("after-worker-send-before-enter");
+      if (!await this.workerLaunchIsActive(original, core)) return;
       const enter = await this.execute("cmux", [
         "send-key",
         "--workspace",
@@ -505,20 +537,26 @@ var V4RuntimeAdapter = class {
         "--surface",
         identity.surfaceUuid,
         "enter"
-      ], { cwd: state.projectRoot, timeout: 3e4 });
+      ], { cwd: state.projectRoot, timeout: 3e4, signal: controller.signal });
       if (enter.code !== 0) throw new Error(`cmux send-key failed: ${enter.stderr || enter.stdout}`);
       this.fail("after-worker-enter-before-hello");
     } catch (error) {
-      await core.markLaunchUnknown(original.id, error instanceof Error ? error.message : String(error));
+      if (!controller.signal.aborted) {
+        await core.markLaunchUnknown(original.id, error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (this.workerLaunches.get(original.id) === controller) this.workerLaunches.delete(original.id);
     }
   }
   async launchLead(state, feature, core) {
     try {
       const resolved = feature.leadResolution;
       if (!resolved) throw new Error("Feature Lead has no explicit persisted model resolution");
+      if (!await this.leadLaunchIsCurrent(feature, core)) return;
       const artifacts = join(this.artifactRoot, "projects", state.projectId, "v4", "features", feature.id);
       await mkdir2(artifacts, { recursive: true, mode: 448 });
-      const scriptPath = join(artifacts, "launch-lead.sh");
+      const scriptPath = join(artifacts, `launch-lead-${feature.leadLaunchGeneration}.sh`);
+      const pidPath = join(artifacts, `launch-lead-${feature.leadLaunchGeneration}.pid`);
       const args = [
         "--approve",
         ...this.extensionPath ? ["--extension", this.extensionPath] : [],
@@ -532,13 +570,16 @@ var V4RuntimeAdapter = class {
         "#!/bin/sh",
         "set -eu",
         `cd ${quote(state.projectRoot)}`,
+        `printf '%s\\n' "$$" > ${quote(pidPath)}`,
         "export PI_LEAD_V4=1",
         `export PI_LEAD_V4_FEATURE_ID=${quote(feature.id)}`,
         `export PI_LEAD_V4_FEATURE_TOKEN=${quote(feature.ownershipToken)}`,
+        `export PI_LEAD_V4_LEAD_GENERATION=${quote(String(feature.leadLaunchGeneration))}`,
         `exec ${[this.piCommand, ...args].map(quote).join(" ")}`,
         ""
       ].join("\n"), { encoding: "utf8", mode: 448 });
       await chmod(scriptPath, 448);
+      if (!await this.leadLaunchIsCurrent(feature, core)) return;
       this.fail("before-lead-workspace-create");
       const created = await this.cmux([
         "new-workspace",
@@ -562,6 +603,12 @@ var V4RuntimeAdapter = class {
       const surfaceUuid = Array.isArray(pane?.surface_ids) ? string(pane?.surface_ids[0]) : void 0;
       assertStableUuid(paneUuid, "Lead paneUuid");
       assertStableUuid(surfaceUuid, "Lead surfaceUuid");
+      let processPid;
+      for (let attempt = 0; attempt < 20 && !processPid; attempt++) {
+        const value = Number((await readFile(pidPath, "utf8").catch(() => "")).trim());
+        if (Number.isInteger(value) && value > 0) processPid = value;
+        else await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
       await core.recordLeadSurface(feature.id, {
         windowUuid,
         workspaceUuid,
@@ -571,9 +618,16 @@ var V4RuntimeAdapter = class {
         workspaceRef: string(created.workspace_ref),
         paneRef: string(pane?.ref),
         surfaceRef: Array.isArray(pane?.surface_refs) ? string(pane?.surface_refs[0]) : void 0
+      }, {
+        ownershipToken: feature.ownershipToken,
+        generation: feature.leadLaunchGeneration,
+        processPid
       });
     } catch (error) {
-      await core.markLeadLaunchUnknown(feature.id, error instanceof Error ? error.message : String(error));
+      await core.markLeadLaunchUnknown(feature.id, error instanceof Error ? error.message : String(error), {
+        ownershipToken: feature.ownershipToken,
+        generation: feature.leadLaunchGeneration
+      });
     }
   }
   async topology(state) {
@@ -685,6 +739,38 @@ var V4RuntimeAdapter = class {
         await core.markLaunchUnknown(task.id, `topology=${presence}, processAttested=${attested}, heartbeatFresh=${heartbeatFresh}`);
       }
     }
+    for (const feature of Object.values(state.features).filter((candidate) => !candidate.ownerAttachmentId && (candidate.leadLaunchState === "launching" || candidate.leadLaunchState === "launched"))) {
+      const age = Date.now() - Date.parse(feature.leadLaunchStartedAt ?? feature.updatedAt);
+      const expired = age > state.config.processHeartbeatSeconds * 1e3;
+      const presence = feature.leadCmux ? classifyIdentity(snapshot, feature.leadCmux) : "unknown";
+      const processAttested = Boolean(feature.leadCmux && feature.leadProcessPid && processAttestationMatches(snapshot, feature.leadCmux, feature.leadProcessPid));
+      const absenceCandidate = Boolean(snapshot.complete && feature.leadCmux && feature.leadProcessPid && !livePid(feature.leadProcessPid) && (presence === "absent" || presence === "present" && !processAttested));
+      let processExited = false;
+      if (absenceCandidate) {
+        const prior = this.leadAbsenceEvidence.get(feature.id);
+        processExited = Boolean(prior && prior.generation === feature.leadLaunchGeneration && prior.capturedAt !== snapshot.capturedAt);
+        this.leadAbsenceEvidence.set(feature.id, { generation: feature.leadLaunchGeneration, capturedAt: snapshot.capturedAt });
+        if (!processExited) continue;
+      } else {
+        this.leadAbsenceEvidence.delete(feature.id);
+      }
+      if (!processExited && !expired) continue;
+      const reconciled = await core.reconcileUnattachedLead({
+        featureId: feature.id,
+        ownershipToken: feature.ownershipToken,
+        launchGeneration: feature.leadLaunchGeneration,
+        processPid: feature.leadProcessPid,
+        retry: processExited,
+        reason: `topology=${presence}, processAttested=${processAttested}, timeoutExpired=${expired}`
+      });
+      if (reconciled) this.leadAbsenceEvidence.delete(feature.id);
+      if (reconciled && expired && !processExited && processAttested && feature.leadProcessPid) {
+        try {
+          process.kill(feature.leadProcessPid, "SIGTERM");
+        } catch {
+        }
+      }
+    }
   }
   async readState(core, fallback) {
     const snapshot = await core.status();
@@ -765,7 +851,7 @@ var V4RuntimeAdapter = class {
 // extensions/lead-v4/store.ts
 import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod as chmod2, mkdir as mkdir3, open, readFile, readdir, rename, rm, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { chmod as chmod2, mkdir as mkdir3, open, readFile as readFile2, readdir, rename, rm, stat, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
 var LOCK_TIMEOUT_MS = 5e3;
 var LOCK_STALE_MS = 3e4;
@@ -811,7 +897,7 @@ async function atomicJson(path, value) {
   await rename(temporary, path);
   await chmod2(path, 384);
 }
-function livePid(pid) {
+function livePid2(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -838,12 +924,12 @@ async function withLock(path, operation) {
       if (error.code !== "EEXIST") throw error;
       const [info, ownerText] = await Promise.all([
         stat(lock).catch(() => void 0),
-        readFile(lock, "utf8").catch(() => "")
+        readFile2(lock, "utf8").catch(() => "")
       ]);
       const ownerValid = /^\d+$/.test(ownerText.trim());
       const ownerPid = ownerValid ? Number(ownerText.trim()) : 0;
       const staleUnknownOwner = info && Date.now() - info.mtimeMs > LOCK_STALE_MS && !ownerValid;
-      if (ownerValid && ownerPid > 0 && !livePid(ownerPid) || staleUnknownOwner) {
+      if (ownerValid && ownerPid > 0 && !livePid2(ownerPid) || staleUnknownOwner) {
         await rm(lock, { force: true });
         continue;
       }
@@ -867,7 +953,7 @@ async function readLegacyDescriptors(projectDirectory) {
   const descriptors = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
     const taskPath = join2(tasksDirectory, entry.name, "task.json");
     try {
-      const source = await readFile(taskPath, "utf8");
+      const source = await readFile2(taskPath, "utf8");
       const task = JSON.parse(source);
       if (task.schemaVersion !== 2 || !task.id) return void 0;
       return {
@@ -922,6 +1008,10 @@ var V4Store = class {
         projectRoot: resolve2(projectRoot),
         projectName,
         config: effectiveV4Config({ ...existing.config, ...config }),
+        features: Object.fromEntries(Object.values(existing.features).map((feature) => [feature.id, {
+          ...feature,
+          leadLaunchGeneration: feature.leadLaunchGeneration ?? (Object.values(existing.attachments).some((attachment) => attachment.featureId === feature.id) ? 1 : feature.leadLaunchState === "attached" ? 0 : 1)
+        }])),
         legacyV2: existing.legacyV2 ?? [],
         operations: existing.operations ?? {},
         updatedAt: at
@@ -948,7 +1038,7 @@ var V4Store = class {
     });
   }
   async read() {
-    return JSON.parse(await readFile(this.statePath, "utf8"));
+    return JSON.parse(await readFile2(this.statePath, "utf8"));
   }
   async update(operation) {
     return withLock(this.statePath, async () => {
@@ -1142,6 +1232,28 @@ var V4SupervisorCore = class {
       if (previous && (previous.ownershipToken !== input.attachmentOwnershipToken || previous.sessionId !== input.sessionId)) {
         throw new Error("Attachment ID is fenced to another token or Pi session");
       }
+      const spawnedFeature = input.featureId ? current.features[input.featureId] : void 0;
+      let replacesUnattachedLaunch = false;
+      if (input.featureId) {
+        if (!spawnedFeature) throw new Error(`Unknown spawned Lead feature ${input.featureId}`);
+        if (spawnedFeature.ownershipToken !== input.featureOwnershipToken || spawnedFeature.leadLaunchGeneration !== input.featureLaunchGeneration) {
+          throw new Error("Spawned Lead feature token/generation is stale");
+        }
+        const priorOwner = spawnedFeature.ownerAttachmentId ? current.attachments[spawnedFeature.ownerAttachmentId] : void 0;
+        if (priorOwner?.state === "attached" && spawnedFeature.ownerAttachmentId !== id) {
+          throw new Error(`Feature is already attached to Lead ${priorOwner.id}`);
+        }
+        const attachableLaunch = spawnedFeature.leadLaunchState === "launching" || spawnedFeature.leadLaunchState === "launched";
+        const detachedReload = spawnedFeature.leadLaunchState === "attached" && priorOwner?.state !== "attached";
+        if (!attachableLaunch && !detachedReload && spawnedFeature.ownerAttachmentId !== id) {
+          throw new Error("Spawned Lead launch is no longer attachable");
+        }
+        replacesUnattachedLaunch = attachableLaunch && !spawnedFeature.ownerAttachmentId;
+      }
+      const addsAttachedProcess = previous?.state !== "attached";
+      if (addsAttachedProcess && !replacesUnattachedLaunch && activeLeadProcessCount(current) >= current.config.maxConcurrentLeads) {
+        throw new Error(`V4 Lead capacity is full (${current.config.maxConcurrentLeads}); attachment refused`);
+      }
       attached = {
         id,
         ownershipToken: previous?.ownershipToken ?? token(),
@@ -1160,19 +1272,18 @@ var V4SupervisorCore = class {
       };
       const attachments = { ...current.attachments, [id]: attached };
       let features = current.features;
-      if (input.featureId && current.features[input.featureId]) {
-        const feature = current.features[input.featureId];
-        if (feature.ownershipToken !== input.featureOwnershipToken) throw new Error("Spawned Lead feature ownership token is invalid");
-        const priorOwner = feature.ownerAttachmentId ? current.attachments[feature.ownerAttachmentId] : void 0;
-        if (!feature.ownerAttachmentId || feature.ownerAttachmentId === id || priorOwner?.state === "detached" || priorOwner?.state === "dead") {
+      if (spawnedFeature) {
+        const priorOwner = spawnedFeature.ownerAttachmentId ? current.attachments[spawnedFeature.ownerAttachmentId] : void 0;
+        if (!spawnedFeature.ownerAttachmentId || spawnedFeature.ownerAttachmentId === id || priorOwner?.state === "detached" || priorOwner?.state === "dead") {
           features = {
             ...features,
-            [feature.id]: {
-              ...feature,
+            [spawnedFeature.id]: {
+              ...spawnedFeature,
               ownerAttachmentId: id,
               ownerAssignedAt: now2(),
-              ownerGeneration: feature.ownerGeneration + Number(feature.ownerAttachmentId !== id),
+              ownerGeneration: spawnedFeature.ownerGeneration + Number(spawnedFeature.ownerAttachmentId !== id),
               leadLaunchState: "attached",
+              leadProcessPid: input.pid,
               leadCmux: input.cmux,
               updatedAt: now2()
             }
@@ -1263,6 +1374,7 @@ var V4SupervisorCore = class {
       };
       const leadResolution = resolveModelSelection({
         explicit: input.leadSelection,
+        spawningLead: inheritedSelection,
         featurePreset: input.preset,
         roleProject: roleProjectSelection(current, "lead"),
         inheritedLead: attachment.inherited ?? inheritedSelection,
@@ -1283,6 +1395,7 @@ var V4SupervisorCore = class {
         preset: input.preset,
         leadResolution,
         leadLaunchState: input.spawnLead ? "queued" : "attached",
+        leadLaunchGeneration: input.spawnLead ? 1 : 0,
         leadCmux: input.spawnLead ? void 0 : attachment.cmux,
         taskIds: [],
         eventCursors: {},
@@ -1357,7 +1470,9 @@ var V4SupervisorCore = class {
       };
       const resolved = resolveModelSelection({
         explicit: input.selection,
-        spawningLead: attachment.featureId === feature.id ? inheritedSelection : void 0,
+        // The attachment invoking this operation is the actual spawning Lead,
+        // including a root Lead that directly owns the feature.
+        spawningLead: inheritedSelection,
         featurePreset: feature.preset,
         roleProject: roleProjectSelection(current, input.role),
         inheritedLead: attachment.inherited ?? inheritedSelection,
@@ -1407,8 +1522,8 @@ var V4SupervisorCore = class {
     await this.store.update((current) => {
       const task = current.tasks[input.taskId];
       if (!task) throw new Error(`Unknown V4 worker ${input.taskId}`);
-      if (task.runtime.ownershipToken !== input.ownershipToken || task.runtime.sessionGeneration !== input.sessionGeneration || task.sessionId !== input.sessionId) {
-        throw new Error("Worker hello failed generation/token/session fencing; generation is quarantined");
+      if (task.runtime.ownershipToken !== input.ownershipToken || task.runtime.sessionGeneration !== input.sessionGeneration || task.sessionId !== input.sessionId || task.status !== "starting" || task.processState !== "launching") {
+        throw new Error("Worker hello failed launch/generation/token/session fencing; generation is quarantined");
       }
       if (task.cmux && !sameIdentity(task.cmux, input.cmux)) {
         mismatch = "Worker hello cmux UUID tuple differs from the persisted launch result";
@@ -1612,12 +1727,14 @@ var V4SupervisorCore = class {
       const attachment = this.requireAttachment(current, input.attachmentId, input.ownershipToken);
       const owned = new Set(Object.values(current.features).filter((feature) => feature.ownerAttachmentId === attachment.id).map((feature) => feature.id));
       const existingClaim = current.events.filter((event) => !event.observedAt && event.claim?.attachmentId === attachment.id);
-      const candidates = existingClaim.length > 0 ? existingClaim : current.events.filter((event) => {
-        if (event.observedAt || !owned.has(event.featureId)) return false;
+      const existingIds = new Set(existingClaim.map((event) => event.id));
+      const newlyOwned = current.events.filter((event) => {
+        if (existingIds.has(event.id) || event.observedAt || !owned.has(event.featureId)) return false;
         if (!input.includeTelemetry && !event.actionable) return false;
         if (!event.claim) return true;
         return Date.now() - Date.parse(event.claim.claimedAt) > 3e4;
       });
+      const candidates = [...existingClaim, ...newlyOwned];
       if (candidates.length === 0) return current;
       const batchId = existingClaim[0]?.claim?.batchId ?? randomUUID3();
       const claimedAt = now2();
@@ -1692,8 +1809,26 @@ var V4SupervisorCore = class {
       if (!task) throw new Error(`Unknown task ${input.taskId}`);
       const feature = current.features[task.featureId];
       if (feature?.ownerAttachmentId !== attachment.id) throw new Error("Only the feature owner may stop its worker");
-      stopped = { ...task, status: "stopped", summary: input.reason, runtime: { ...task.runtime, terminalAt: now2() }, updatedAt: now2() };
-      return appendEvent({ ...current, tasks: { ...current.tasks, [task.id]: stopped } }, { featureId: task.featureId, taskId: task.id, kind: "telemetry", actionable: false, summary: `Stop requested for ${task.id.slice(0, 8)}; surface retention remains enabled` });
+      if (task.status === "stopped") {
+        stopped = task;
+        return current;
+      }
+      const cancelLaunch = task.processState === "queued" || task.processState === "launching";
+      stopped = {
+        ...task,
+        status: "stopped",
+        processState: cancelLaunch ? "stopped" : task.processState,
+        summary: input.reason,
+        runtime: cancelLaunch ? { ...task.runtime, ownershipToken: token(), sessionGeneration: task.runtime.sessionGeneration + 1, terminalAt: now2() } : { ...task.runtime, terminalAt: now2() },
+        updatedAt: now2()
+      };
+      return appendEvent({ ...current, tasks: { ...current.tasks, [task.id]: stopped } }, {
+        featureId: task.featureId,
+        taskId: task.id,
+        kind: "telemetry",
+        actionable: false,
+        summary: cancelLaunch ? `Stop atomically cancelled the queued/launching generation for ${task.id.slice(0, 8)}; surface retention remains enabled` : `Stop requested for ${task.id.slice(0, 8)}; surface retention remains enabled`
+      });
     });
     return stopped;
   }
@@ -1730,7 +1865,8 @@ var V4SupervisorCore = class {
       leads = fairLeadLaunches(next);
       workers = fairWorkerLaunches(next);
       const features = { ...next.features };
-      for (const feature of leads) features[feature.id] = { ...feature, leadLaunchState: "launching", updatedAt: now2() };
+      leads = leads.map((feature) => ({ ...feature, leadLaunchState: "launching", leadLaunchStartedAt: now2(), leadProcessPid: void 0, leadCmux: void 0, updatedAt: now2() }));
+      for (const feature of leads) features[feature.id] = feature;
       const tasks = { ...next.tasks };
       for (const task of workers) tasks[task.id] = { ...task, status: "starting", processState: "launching", updatedAt: now2() };
       return { ...next, features, tasks, schedulerCursor: workers.at(-1)?.featureId ?? next.schedulerCursor };
@@ -1767,12 +1903,28 @@ var V4SupervisorCore = class {
       return { ...current, tasks: { ...current.tasks, [task.id]: { ...task, cmux: identity, updatedAt: now2() } } };
     });
   }
-  async recordLeadSurface(featureId, identity) {
+  async recordLeadSurface(featureId, identity, launch) {
     assertIdentity(identity);
     await this.store.update((current) => {
       const feature = current.features[featureId];
-      if (!feature || feature.leadLaunchState !== "launching") throw new Error("Lead launch intent is not active");
-      return { ...current, features: { ...current.features, [feature.id]: { ...feature, leadCmux: identity, leadLaunchState: "launched", updatedAt: now2() } } };
+      if (!feature || feature.ownershipToken !== launch.ownershipToken || feature.leadLaunchGeneration !== launch.generation || feature.leadLaunchState !== "launching" && feature.leadLaunchState !== "attached") {
+        throw new Error("Lead launch intent failed token/generation fencing");
+      }
+      const owner = feature.ownerAttachmentId ? current.attachments[feature.ownerAttachmentId] : void 0;
+      if (owner && !sameIdentity(owner.cmux, identity)) throw new Error("Attached Lead cmux identity differs from its launch result");
+      return {
+        ...current,
+        features: {
+          ...current.features,
+          [feature.id]: {
+            ...feature,
+            leadCmux: identity,
+            leadProcessPid: owner?.pid ?? launch.processPid,
+            leadLaunchState: owner ? "attached" : "launched",
+            updatedAt: now2()
+          }
+        }
+      };
     });
   }
   async recoverAfterSupervisorRestart() {
@@ -1783,34 +1935,72 @@ var V4SupervisorCore = class {
         next = appendEvent({ ...next, tasks: { ...next.tasks, [task.id]: updated } }, { featureId: task.featureId, taskId: task.id, kind: "runtime", actionable: true, summary: `Incomplete launch for ${task.id.slice(0, 8)} is UNKNOWN after supervisor restart; no duplicate launch is allowed` });
       }
       for (const feature of Object.values(next.features).filter((candidate) => candidate.leadLaunchState === "launching")) {
-        const updated = { ...feature, leadLaunchState: "unowned", updatedAt: now2() };
+        const updated = {
+          ...feature,
+          ownershipToken: token(),
+          leadLaunchGeneration: feature.leadLaunchGeneration + 1,
+          leadLaunchState: "unowned",
+          updatedAt: now2()
+        };
         next = appendEvent({ ...next, features: { ...next.features, [feature.id]: updated } }, {
           featureId: feature.id,
           kind: "runtime",
           actionable: true,
-          summary: `Incomplete feature Lead launch is UNKNOWN after supervisor restart; any possibly-live Lead workspace is retained`
+          summary: `Incomplete feature Lead launch is fenced UNKNOWN after supervisor restart; any possibly-live Lead workspace is retained`
         });
       }
       return next;
     });
   }
-  async markLeadLaunchUnknown(featureId, reason) {
+  async markLeadLaunchUnknown(featureId, reason, launch) {
     await this.store.update((current) => {
       const feature = current.features[featureId];
-      if (!feature) return current;
-      const updated = { ...feature, leadLaunchState: "unowned", updatedAt: now2() };
+      if (!feature || feature.ownerAttachmentId || feature.leadLaunchState !== "launching") return current;
+      if (launch && (feature.ownershipToken !== launch.ownershipToken || feature.leadLaunchGeneration !== launch.generation)) return current;
+      const updated = {
+        ...feature,
+        ownershipToken: token(),
+        leadLaunchGeneration: feature.leadLaunchGeneration + 1,
+        leadLaunchState: "unowned",
+        updatedAt: now2()
+      };
       return appendEvent({ ...current, features: { ...current.features, [feature.id]: updated } }, {
         featureId: feature.id,
         kind: "runtime",
         actionable: true,
-        summary: `Feature Lead launch outcome UNKNOWN: ${reason}. A possibly-live Lead workspace is never closed or relaunched automatically.`
+        summary: `Feature Lead launch outcome UNKNOWN and its generation was fenced: ${reason}. A possibly-live Lead workspace is never relaunched automatically.`
       });
     });
+  }
+  async reconcileUnattachedLead(input) {
+    let reconciled = false;
+    await this.store.update((current) => {
+      const feature = current.features[input.featureId];
+      if (!feature || feature.ownerAttachmentId || feature.leadLaunchState !== "launching" && feature.leadLaunchState !== "launched" || feature.ownershipToken !== input.ownershipToken || feature.leadLaunchGeneration !== input.launchGeneration || feature.leadProcessPid !== input.processPid) return current;
+      reconciled = true;
+      const updated = {
+        ...feature,
+        ownershipToken: token(),
+        leadLaunchGeneration: feature.leadLaunchGeneration + 1,
+        leadLaunchState: input.retry ? "queued" : "unowned",
+        leadLaunchStartedAt: void 0,
+        leadProcessPid: void 0,
+        leadCmux: void 0,
+        updatedAt: now2()
+      };
+      return appendEvent({ ...current, features: { ...current.features, [feature.id]: updated } }, {
+        featureId: feature.id,
+        kind: "runtime",
+        actionable: !input.retry,
+        summary: input.retry ? `Spawned Lead exited before attachment; fenced generation ${input.launchGeneration} was safely requeued (${input.reason})` : `Spawned Lead timed out before attachment; fenced generation ${input.launchGeneration} released capacity (${input.reason})`
+      });
+    });
+    return reconciled;
   }
   async markLaunchUnknown(taskId, reason) {
     await this.store.update((current) => {
       const task = current.tasks[taskId];
-      if (!task) return current;
+      if (!task || !["launching", "running"].includes(task.processState) || task.status === "stopped") return current;
       const updated = { ...task, processState: "unknown", runtime: { ...task.runtime, crashReason: reason }, updatedAt: now2() };
       return appendEvent({ ...current, tasks: { ...current.tasks, [task.id]: updated } }, { featureId: task.featureId, taskId: task.id, kind: "runtime", actionable: true, summary: `Launch outcome UNKNOWN: ${reason}. Duplicate launch, resume, reuse, and cleanup are forbidden.` });
     });
@@ -1936,8 +2126,11 @@ async function dispatch(method, params) {
       return runtime.core.claimDigest(params.input);
     case "acknowledgeDigest":
       return runtime.core.acknowledgeDigest(params.input);
-    case "stopTask":
-      return runtime.core.stopTask(params.input);
+    case "stopTask": {
+      const task = await runtime.core.stopTask(params.input);
+      runtime.adapter.abortWorkerLaunch(task.id);
+      return task;
+    }
     case "status":
       return runtime.core.status();
     case "rollbackCheck": {

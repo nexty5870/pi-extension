@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { GitWorktrees, type CommandExecutor } from "../lead/git.ts";
 import { observePullRequest } from "../lead/github.ts";
@@ -13,6 +13,16 @@ const execFileAsync = promisify(execFile);
 
 function quote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function livePid(pid: number | undefined): boolean {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -61,6 +71,8 @@ function identityFrom(value: Record<string, unknown>, fallback?: Partial<StableC
 export class V4RuntimeAdapter {
   private readonly git: GitWorktrees;
   private agentsWorkspaceCreation?: Promise<AgentsWorkspace>;
+  private readonly workerLaunches = new Map<string, AbortController>();
+  private readonly leadAbsenceEvidence = new Map<string, { generation: number; capturedAt: string }>();
   private cmuxSocketPath = process.env.CMUX_SOCKET_PATH;
   readonly execute: CommandExecutor;
 
@@ -93,14 +105,35 @@ export class V4RuntimeAdapter {
     if (path) this.cmuxSocketPath = path;
   }
 
-  private async cmux(args: string[], cwd: string, timeout = 30_000): Promise<Record<string, unknown>> {
-    const result = await this.execute("cmux", ["--json", "--id-format", "both", ...args], { cwd, timeout });
+  private async cmux(args: string[], cwd: string, timeout = 30_000, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const result = await this.execute("cmux", ["--json", "--id-format", "both", ...args], { cwd, timeout, signal });
     if (result.code !== 0) throw new Error(`cmux ${args[0]} failed: ${result.stderr.trim() || result.stdout.trim()}`);
     return parseJson(result.stdout, args[0]);
   }
 
   private fail(name: string): void {
     if (this.failpoint === name) throw new Error(`Injected V4 failpoint: ${name}`);
+  }
+
+  abortWorkerLaunch(taskId: string): void {
+    this.workerLaunches.get(taskId)?.abort(new Error("Worker launch was stopped by its owning Lead"));
+  }
+
+  private async workerLaunchIsActive(task: WorkerTaskV4, core: V4SupervisorCore): Promise<boolean> {
+    const current = (await core.status()).tasks.find((candidate) => candidate.id === task.id);
+    return Boolean(current
+      && current.status === "starting"
+      && current.processState === "launching"
+      && current.runtime.ownershipToken === task.runtime.ownershipToken
+      && current.runtime.sessionGeneration === task.runtime.sessionGeneration);
+  }
+
+  private async leadLaunchIsCurrent(feature: FeatureTrack, core: V4SupervisorCore): Promise<boolean> {
+    const current = (await core.status()).features.find((candidate) => candidate.id === feature.id);
+    return Boolean(current
+      && (current.leadLaunchState === "launching" || current.leadLaunchState === "attached")
+      && current.ownershipToken === feature.ownershipToken
+      && current.leadLaunchGeneration === feature.leadLaunchGeneration);
   }
 
   async ensureAgentsWorkspace(state: V4ProjectState, core: V4SupervisorCore): Promise<AgentsWorkspace> {
@@ -151,20 +184,25 @@ export class V4RuntimeAdapter {
   }
 
   async launchWorker(state: V4ProjectState, original: WorkerTaskV4, core: V4SupervisorCore): Promise<void> {
-    const current = (await core.status()).tasks.find((task) => task.id === original.id);
-    if (!current || current.processState !== "launching") return;
+    if (this.workerLaunches.has(original.id)) return;
+    const controller = new AbortController();
+    this.workerLaunches.set(original.id, controller);
     try {
+      const current = (await core.status()).tasks.find((task) => task.id === original.id);
+      if (!current || !await this.workerLaunchIsActive(original, core)) return;
       let task = current;
       if (task.role === "implementation" && !task.baseSha) {
         this.fail("before-worktree-create");
-        const project = await this.git.inspect(state.projectRoot);
+        const project = await this.git.inspect(state.projectRoot, controller.signal);
         const created = await this.git.create(project, {
           taskId: task.id,
           title: task.title,
           baseBranch: task.baseBranch,
           destination: task.worktreePath,
+          signal: controller.signal,
         });
         this.fail("after-worktree-create-before-record");
+        if (!await this.workerLaunchIsActive(original, core)) return;
         await core.recordWorkerProvision(task.id, {
           worktreePath: created.path,
           baseBranch: created.baseBranch,
@@ -178,7 +216,8 @@ export class V4RuntimeAdapter {
       if (task.role === "review") {
         const parent = task.parentTaskId ? refreshedState.tasks[task.parentTaskId] : undefined;
         if (!parent?.baseSha) throw new Error("Review parent has no persisted base SHA");
-        const capture = await this.git.reviewPacket(parent.worktreePath, parent.baseSha);
+        const capture = await this.git.reviewPacket(parent.worktreePath, parent.baseSha, controller.signal);
+        if (!await this.workerLaunchIsActive(original, core)) return;
         await core.recordReviewTarget(task.id, {
           parentTaskId: parent.id,
           diffHash: capture.diffHash,
@@ -205,6 +244,7 @@ export class V4RuntimeAdapter {
         refreshedState = await this.readState(core, state);
       }
       const agents = await this.ensureAgentsWorkspace(refreshedState, core);
+      if (!await this.workerLaunchIsActive(original, core)) return;
       this.fail("before-worker-surface-create");
       const created = await this.cmux([
         "new-surface",
@@ -213,8 +253,9 @@ export class V4RuntimeAdapter {
         "--type", "terminal",
         "--working-directory", task.worktreePath,
         "--focus", "false",
-      ], state.projectRoot);
+      ], state.projectRoot, 30_000, controller.signal);
       this.fail("after-worker-surface-create-before-record");
+      if (!await this.workerLaunchIsActive(original, core)) return;
       const identity = identityFrom(created, {
         windowUuid: agents.windowUuid,
         workspaceUuid: agents.workspaceUuid,
@@ -229,19 +270,25 @@ export class V4RuntimeAdapter {
       await writeFile(assignmentPath, this.workerPrompt(task, reviewEvidence), { encoding: "utf8", mode: 0o600 });
       await writeFile(scriptPath, this.workerScript(task, assignmentPath, state.projectRoot), { encoding: "utf8", mode: 0o700 });
       await chmod(scriptPath, 0o700);
+      if (!await this.workerLaunchIsActive(original, core)) return;
       const send = await this.execute("cmux", [
         "send", "--workspace", identity.workspaceUuid, "--surface", identity.surfaceUuid, "--", `exec ${quote(scriptPath)}`,
-      ], { cwd: state.projectRoot, timeout: 30_000 });
+      ], { cwd: state.projectRoot, timeout: 30_000, signal: controller.signal });
       if (send.code !== 0) throw new Error(`cmux send failed: ${send.stderr || send.stdout}`);
       this.fail("after-worker-send-before-enter");
+      if (!await this.workerLaunchIsActive(original, core)) return;
       const enter = await this.execute("cmux", [
         "send-key", "--workspace", identity.workspaceUuid, "--surface", identity.surfaceUuid, "enter",
-      ], { cwd: state.projectRoot, timeout: 30_000 });
+      ], { cwd: state.projectRoot, timeout: 30_000, signal: controller.signal });
       if (enter.code !== 0) throw new Error(`cmux send-key failed: ${enter.stderr || enter.stdout}`);
       this.fail("after-worker-enter-before-hello");
       // Remains launching until a generation/token/session/UUID-attested hello.
     } catch (error) {
-      await core.markLaunchUnknown(original.id, error instanceof Error ? error.message : String(error));
+      if (!controller.signal.aborted) {
+        await core.markLaunchUnknown(original.id, error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (this.workerLaunches.get(original.id) === controller) this.workerLaunches.delete(original.id);
     }
   }
 
@@ -249,9 +296,11 @@ export class V4RuntimeAdapter {
     try {
       const resolved = feature.leadResolution;
       if (!resolved) throw new Error("Feature Lead has no explicit persisted model resolution");
+      if (!await this.leadLaunchIsCurrent(feature, core)) return;
       const artifacts = join(this.artifactRoot, "projects", state.projectId, "v4", "features", feature.id);
       await mkdir(artifacts, { recursive: true, mode: 0o700 });
-      const scriptPath = join(artifacts, "launch-lead.sh");
+      const scriptPath = join(artifacts, `launch-lead-${feature.leadLaunchGeneration}.sh`);
+      const pidPath = join(artifacts, `launch-lead-${feature.leadLaunchGeneration}.pid`);
       const args = [
         "--approve",
         ...(this.extensionPath ? ["--extension", this.extensionPath] : []),
@@ -263,13 +312,16 @@ export class V4RuntimeAdapter {
         "#!/bin/sh",
         "set -eu",
         `cd ${quote(state.projectRoot)}`,
+        `printf '%s\\n' "$$" > ${quote(pidPath)}`,
         "export PI_LEAD_V4=1",
         `export PI_LEAD_V4_FEATURE_ID=${quote(feature.id)}`,
         `export PI_LEAD_V4_FEATURE_TOKEN=${quote(feature.ownershipToken)}`,
+        `export PI_LEAD_V4_LEAD_GENERATION=${quote(String(feature.leadLaunchGeneration))}`,
         `exec ${[this.piCommand, ...args].map(quote).join(" ")}`,
         "",
       ].join("\n"), { encoding: "utf8", mode: 0o700 });
       await chmod(scriptPath, 0o700);
+      if (!await this.leadLaunchIsCurrent(feature, core)) return;
       this.fail("before-lead-workspace-create");
       const created = await this.cmux([
         "new-workspace",
@@ -289,6 +341,12 @@ export class V4RuntimeAdapter {
       const surfaceUuid = Array.isArray(pane?.surface_ids) ? string(pane?.surface_ids[0]) : undefined;
       assertStableUuid(paneUuid, "Lead paneUuid");
       assertStableUuid(surfaceUuid, "Lead surfaceUuid");
+      let processPid: number | undefined;
+      for (let attempt = 0; attempt < 20 && !processPid; attempt++) {
+        const value = Number((await readFile(pidPath, "utf8").catch(() => "")).trim());
+        if (Number.isInteger(value) && value > 0) processPid = value;
+        else await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
       await core.recordLeadSurface(feature.id, {
         windowUuid,
         workspaceUuid,
@@ -298,11 +356,18 @@ export class V4RuntimeAdapter {
         workspaceRef: string(created.workspace_ref),
         paneRef: string(pane?.ref),
         surfaceRef: Array.isArray(pane?.surface_refs) ? string(pane?.surface_refs[0]) : undefined,
+      }, {
+        ownershipToken: feature.ownershipToken,
+        generation: feature.leadLaunchGeneration,
+        processPid,
       });
     } catch (error) {
       // Lead launch uncertainty is retained as unowned; never close or repeat a
       // possibly-live Lead workspace automatically.
-      await core.markLeadLaunchUnknown(feature.id, error instanceof Error ? error.message : String(error));
+      await core.markLeadLaunchUnknown(feature.id, error instanceof Error ? error.message : String(error), {
+        ownershipToken: feature.ownershipToken,
+        generation: feature.leadLaunchGeneration,
+      });
     }
   }
 
@@ -422,6 +487,50 @@ export class V4RuntimeAdapter {
       const heartbeatFresh = Date.now() - Date.parse(task.runtime.lastHeartbeatAt ?? "") <= state.config.processHeartbeatSeconds * 1_000;
       if (presence !== "present" || !attested || !heartbeatFresh) {
         await core.markLaunchUnknown(task.id, `topology=${presence}, processAttested=${attested}, heartbeatFresh=${heartbeatFresh}`);
+      }
+    }
+
+    for (const feature of Object.values(state.features).filter((candidate) =>
+      !candidate.ownerAttachmentId
+      && (candidate.leadLaunchState === "launching" || candidate.leadLaunchState === "launched"))) {
+      const age = Date.now() - Date.parse(feature.leadLaunchStartedAt ?? feature.updatedAt);
+      const expired = age > state.config.processHeartbeatSeconds * 1_000;
+      const presence = feature.leadCmux ? classifyIdentity(snapshot, feature.leadCmux) : "unknown";
+      const processAttested = Boolean(feature.leadCmux && feature.leadProcessPid
+        && processAttestationMatches(snapshot, feature.leadCmux, feature.leadProcessPid));
+      const absenceCandidate = Boolean(snapshot.complete
+        && feature.leadCmux
+        && feature.leadProcessPid
+        && !livePid(feature.leadProcessPid)
+        && (presence === "absent" || (presence === "present" && !processAttested)));
+      let processExited = false;
+      if (absenceCandidate) {
+        const prior = this.leadAbsenceEvidence.get(feature.id);
+        processExited = Boolean(prior
+          && prior.generation === feature.leadLaunchGeneration
+          && prior.capturedAt !== snapshot.capturedAt);
+        this.leadAbsenceEvidence.set(feature.id, { generation: feature.leadLaunchGeneration, capturedAt: snapshot.capturedAt });
+        // Replacement/requeue requires two fresh complete topology snapshots and
+        // a dead exact PID, never one transient cmux observation.
+        if (!processExited) continue;
+      } else {
+        this.leadAbsenceEvidence.delete(feature.id);
+      }
+      if (!processExited && !expired) continue;
+      const reconciled = await core.reconcileUnattachedLead({
+        featureId: feature.id,
+        ownershipToken: feature.ownershipToken,
+        launchGeneration: feature.leadLaunchGeneration,
+        processPid: feature.leadProcessPid,
+        retry: processExited,
+        reason: `topology=${presence}, processAttested=${processAttested}, timeoutExpired=${expired}`,
+      });
+      if (reconciled) this.leadAbsenceEvidence.delete(feature.id);
+      // A live but unattached process that exceeded its deadline is fenced in
+      // durable state before this exact attested PID is asked to stop. It can no
+      // longer attach with its stale token/generation or consume capacity forever.
+      if (reconciled && expired && !processExited && processAttested && feature.leadProcessPid) {
+        try { process.kill(feature.leadProcessPid, "SIGTERM"); } catch { /* already exited */ }
       }
     }
   }
